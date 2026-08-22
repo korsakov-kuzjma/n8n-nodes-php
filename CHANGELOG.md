@@ -2,6 +2,25 @@
 
 All notable changes to this project will be documented in this file.
 
+## 2.0.1 - 2026-08-23
+
+### Fixed
+
+- **Additional Files are now scanned by static analysis in Restricted mode** before being written into the sandbox; violations are reported with the offending file name. Previously only the main PHP code was checked.
+- Static analysis now validates the `phpCode` resolved **for every input item**, not just the first one — item-by-item mode with expressions could previously skip the scan for items after the first.
+- The fatal-error envelope survives error messages containing invalid UTF-8 (`JSON_INVALID_UTF8_SUBSTITUTE`) instead of degrading to a generic exit-code error.
+
+### Security
+
+- Extended the runtime `disable_functions` blocklist in Restricted mode with network primitives: `fsockopen`, `pfsockopen`, `stream_socket_client`, `stream_socket_server`, `curl_init`, `curl_exec`, `curl_multi_init`, `curl_multi_exec`, `socket_create`, `socket_create_listen`.
+- Sandbox hardening: additional-file writes use exclusive creation (no symlink races), failed writes clean up their temporary files, and when n8n runs as root a sandbox directory owned by another user aborts execution instead of being reused.
+
+### Changed
+
+- The result cache stores raw process output instead of fully parsed items and skips entries larger than 1 MB, bounding its memory footprint.
+- Clarified option descriptions: Options are evaluated once against the first input item; in batch mode all outputs are paired with the first input item when counts differ; outputs over 1 MB are not cached.
+- Removed dead exports (`parsePhpOutput`, `RESTRICTED_PATTERN_LABELS`) and a raw NUL byte that made one source file read as binary.
+
 ## 2.0.0 - 2026-08-23
 
 ### ⚠️ Breaking changes

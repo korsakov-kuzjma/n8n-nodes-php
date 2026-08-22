@@ -217,6 +217,13 @@ Restricted mode is designed so that even hostile code cannot escape to a shell o
 
 ## Version history
 
+### 2.0.1
+
+- Bugfix release: static analysis now covers **Additional Files** and the `phpCode` resolved for every input item (Restricted mode).
+- Extended runtime blocklist in Restricted mode with network primitives (`fsockopen`, `stream_socket_*`, `curl_*`, `socket_*`).
+- Sandbox hardening: race-free exclusive writes, temp-file cleanup, ownership check under root; fatal envelope survives invalid UTF-8.
+- Result cache bounded to 1 MB per entry and stores raw output.
+
 ### 2.0.0
 
 - **Breaking:** PHP code is piped to STDIN (in-memory execution); data arrives as `$n8nInput` / `$n8nItems` / `$n8nContext` variables instead of `php://stdin`; `__FILE__`/`__DIR__` resolve to `Standard input code`.
