@@ -104,6 +104,13 @@ echo json_encode(["greeting" => "Hello, {{ $json.name }}"]);
 
 ## Version history
 
+### 0.2.0
+
+- **Timeout** option (default 30 s) kills runaway PHP scripts.
+- Safe per-execution temp directories; clear error when `php` is missing from `PATH`.
+- Node can be used as an AI agent tool (`usableAsTool`); dark-theme icon.
+- Reliability fixes: CI triggers on `master`, scalar JSON output handling, lint compliance.
+
 ### 0.1.0
 
 - Initial release: **PHP Execute** node that runs arbitrary PHP code via the local PHP CLI.
