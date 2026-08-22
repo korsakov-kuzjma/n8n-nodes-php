@@ -71,8 +71,8 @@ jobs:
     permissions:
       # Required to mint an OIDC token for npm provenance attestation.
       id-token: write
-      # Scoped down from the default (write) for least-privilege publishing.
-      contents: read
+      # Needed to create the GitHub Release object for the tag.
+      contents: write
 
     steps:
       - uses: actions/checkout@v4
@@ -99,3 +99,29 @@ jobs:
           npm run release
         env:
           NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+      - name: Create GitHub Release
+        # Creates the GitHub Release object for the tag after npm publishing
+        # has succeeded. The body is taken from the matching "## <version>"
+        # section of CHANGELOG.md; if that section is missing, GitHub's
+        # auto-generated notes are used instead.
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          VERSION="${GITHUB_REF_NAME}"
+          if gh release view "$VERSION" >/dev/null 2>&1; then
+            echo "Release $VERSION already exists — skipping."
+            exit 0
+          fi
+          BODY=$(awk -v ver="$VERSION" '
+            BEGIN { prefix = "## " ver }
+            substr($0, 1, length(prefix)) == prefix &&
+              (length($0) == length(prefix) || substr($0, length(prefix) + 1, 1) == " ") { found = 1; next }
+            found && /^## / { exit }
+            found { print }
+          ' CHANGELOG.md)
+          if [ -n "$BODY" ]; then
+            gh release create "$VERSION" --title "$VERSION" --notes "$BODY" --verify-tag
+          else
+            gh release create "$VERSION" --title "$VERSION" --generate-notes --verify-tag
+          fi
