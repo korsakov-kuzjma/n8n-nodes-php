@@ -15,7 +15,10 @@ export const MAX_OUTPUT_BYTES = 10 * 1024 * 1024;
 const GRACEFUL_SHUTDOWN_MS = 2000;
 
 export const EXTENDED_DISABLED_FUNCTIONS =
-	'exec,shell_exec,system,passthru,popen,proc_open,pcntl_exec,dl,putenv,posix_kill,proc_nice';
+	'exec,shell_exec,system,passthru,popen,proc_open,pcntl_exec,dl,putenv,posix_kill,proc_nice,' +
+	'fsockopen,pfsockopen,stream_socket_client,stream_socket_server,' +
+	'curl_init,curl_exec,curl_multi_init,curl_multi_exec,' +
+	'socket_create,socket_create_listen';
 
 export interface ProcessIsolation {
 	uid?: number;

@@ -10,8 +10,10 @@ import {
 	runPhpProcess,
 } from '../helpers/phpProcess';
 import { buildInjectedCode } from '../helpers/bootstrap';
+import { throwIfFatal } from '../helpers/outputParser';
 import {
 	PhpBinaryNotFoundError,
+	PhpFatalError,
 	PhpProcessError,
 	PhpTimeoutError,
 	OutputLimitExceededError,
@@ -87,7 +89,10 @@ describe('buildPhpArgs', () => {
 		});
 
 		expect(args).toContain(
-			'disable_functions=exec,shell_exec,system,passthru,popen,proc_open,pcntl_exec,dl,putenv,posix_kill,proc_nice',
+			'disable_functions=exec,shell_exec,system,passthru,popen,proc_open,pcntl_exec,dl,putenv,posix_kill,proc_nice,' +
+				'fsockopen,pfsockopen,stream_socket_client,stream_socket_server,' +
+				'curl_init,curl_exec,curl_multi_init,curl_multi_exec,' +
+				'socket_create,socket_create_listen',
 		);
 		expect(args).toContain('allow_url_fopen=0');
 		expect(args).toContain('allow_url_include=0');
@@ -182,6 +187,16 @@ describe('runPhpProcess (integration)', () => {
 				'putenv',
 				'posix_kill',
 				'proc_nice',
+				'fsockopen',
+				'pfsockopen',
+				'stream_socket_client',
+				'stream_socket_server',
+				'curl_init',
+				'curl_exec',
+				'curl_multi_init',
+				'curl_multi_exec',
+				'socket_create',
+				'socket_create_listen',
 			]),
 		);
 		expect(allowUrlFopen).toBe('0');
@@ -291,6 +306,18 @@ describe('runPhpProcess (integration)', () => {
 		expect(result.exitCode).not.toBe(0);
 		expect(result.stderr).toMatch(/Allowed memory size of \d+ bytes exhausted/);
 	}, 30000);
+
+	it('keeps the fatal envelope intact when the error message is not valid UTF-8', async () => {
+		const result = await runPhpProcess({
+			binaryPath: 'php',
+			injectedCode: buildInjectedCode('<?php $f = "\\xC3\\x28"; $f();'),
+			timeoutMs: 10000,
+		});
+
+		expect(result.exitCode).not.toBe(0);
+		expect(result.stdout).toContain('__php_fatal_error');
+		expect(() => throwIfFatal(result.stdout, result.stderr, 128)).toThrow(PhpFatalError);
+	}, 15000);
 });
 
 describe('runPhpProcess signal handling (injected fake process)', () => {

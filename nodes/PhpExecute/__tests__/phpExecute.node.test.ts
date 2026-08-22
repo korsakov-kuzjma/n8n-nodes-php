@@ -17,6 +17,7 @@ const mockedRun = runPhpProcess as jest.Mock;
 interface ContextOverrides {
 	items?: Array<{ json: Record<string, unknown> }>;
 	parameters?: Record<string, unknown>;
+	parametersByItem?: Record<number, Record<string, unknown>>;
 	continueOnFail?: boolean;
 }
 
@@ -39,7 +40,9 @@ function createStubContext(overrides: ContextOverrides = {}): IExecuteFunctions 
 	const stub = {
 		logger,
 		getInputData: () => overrides.items ?? [],
-		getNodeParameter: (name: string, _itemIndex?: number, fallback?: unknown) => {
+		getNodeParameter: (name: string, itemIndex = 0, fallback?: unknown) => {
+			const perItem = overrides.parametersByItem?.[itemIndex];
+			if (perItem && name in perItem) return perItem[name];
 			if (name in parameters) return parameters[name];
 			if (fallback !== undefined) return fallback;
 			throw new Error(`No parameter configured: ${name}`);
@@ -241,6 +244,25 @@ describe('PhpExecute.execute (caching)', () => {
 
 		expect(mockedRun).toHaveBeenCalledTimes(2);
 	});
+
+	it('does not cache outputs larger than 1 MB', async () => {
+		const big = JSON.stringify({ blob: 'x'.repeat(1024 * 1024 + 16) });
+		mockedRun.mockImplementation(async () => phpOk(big));
+
+		const makeCtx = () =>
+			createStubContext({
+				items: [{ json: { x: 1 } }],
+				parameters: {
+					phpCode: '<?php echo json_encode(["blob" => str_repeat("x", 1048600)]);',
+					options: { resultCacheTtlSeconds: 60 },
+				},
+			});
+
+		await new PhpExecute().execute.call(makeCtx());
+		await new PhpExecute().execute.call(makeCtx());
+
+		expect(mockedRun).toHaveBeenCalledTimes(2);
+	});
 });
 
 describe('PhpExecute.execute (error handling)', () => {
@@ -262,6 +284,57 @@ describe('PhpExecute.execute (error handling)', () => {
 			/shell execution function \(exec\)/,
 		);
 		expect(mockedRun).not.toHaveBeenCalled();
+	});
+
+	it('blocks forbidden patterns inside additional files in restricted mode', async () => {
+		const ctx = createStubContext({
+			items: [{ json: {} }],
+			parameters: {
+				phpCode: DEFAULT_CODE,
+				additionalFiles: {
+					files: [{ name: 'helpers.php', content: "<?php system('id');" }],
+				},
+				options: { securityLevel: 'restricted' },
+			},
+		});
+
+		await expect(new PhpExecute().execute.call(ctx)).rejects.toThrow(
+			/additional file "helpers\.php".*shell execution function \(system\)/s,
+		);
+		expect(mockedRun).not.toHaveBeenCalled();
+	});
+
+	it('allows the same additional files in unrestricted mode', async () => {
+		mockedRun.mockResolvedValue(phpOk('{"ok":true}'));
+		const ctx = createStubContext({
+			items: [{ json: {} }],
+			parameters: {
+				phpCode: DEFAULT_CODE,
+				additionalFiles: {
+					files: [{ name: 'helpers.php', content: "<?php system('id');" }],
+				},
+				options: { securityLevel: 'unrestricted' },
+			},
+		});
+
+		await expect(new PhpExecute().execute.call(ctx)).resolves.toBeDefined();
+	});
+
+	it('scans the phpCode resolved for every item, not only the first one', async () => {
+		mockedRun.mockResolvedValue(phpOk('{"i":0}'));
+		const ctx = createStubContext({
+			items: [{ json: { n: 1 } }, { json: { n: 2 } }],
+			parameters: { options: {} },
+			parametersByItem: {
+				0: { phpCode: '<?php echo json_encode(["i" => 0]);' },
+				1: { phpCode: "<?php shell_exec('whoami');" },
+			},
+		});
+
+		await expect(new PhpExecute().execute.call(ctx)).rejects.toThrow(
+			/shell execution function \(shell_exec\)/,
+		);
+		expect(mockedRun).toHaveBeenCalledTimes(1);
 	});
 
 	it('allows the same code in unrestricted mode', async () => {

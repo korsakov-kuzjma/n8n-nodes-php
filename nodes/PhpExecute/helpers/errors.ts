@@ -31,9 +31,9 @@ export class PhpMemoryLimitError extends PhpNodeError {
 }
 
 export class PhpSafeModeViolationError extends PhpNodeError {
-	constructor(violations: string[]) {
+	constructor(violations: string[], subject = 'the script') {
 		super(
-			`Restricted security level blocked the script before execution. Forbidden patterns detected: ${violations.join(', ')}. Switch Security Level to Unrestricted if you trust this code.`,
+			`Restricted security level blocked ${subject} before execution. Forbidden patterns detected: ${violations.join(', ')}. Switch Security Level to Unrestricted if you trust this code.`,
 		);
 		this.name = 'PhpSafeModeViolationError';
 	}

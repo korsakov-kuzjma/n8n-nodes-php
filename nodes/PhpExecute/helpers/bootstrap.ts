@@ -15,7 +15,7 @@ register_shutdown_function(static function () use (&$__n8n_start) {
 			'message' => (string) $__err['message'],
 			'file' => (string) $__err['file'],
 			'line' => (int) $__err['line'],
-		]) . "\\n");
+		], JSON_INVALID_UTF8_SUBSTITUTE) . "\\n");
 	}
 	fwrite(STDERR, '${METRICS_MARKER}' . json_encode([
 		'phpVersion' => PHP_VERSION,

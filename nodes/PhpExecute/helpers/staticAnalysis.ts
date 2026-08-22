@@ -75,8 +75,6 @@ const STATIC_PATTERNS: StaticPattern[] = [
 	},
 ];
 
-export const RESTRICTED_PATTERN_LABELS = STATIC_PATTERNS.map((pattern) => pattern.label);
-
 export function findRestrictedPatterns(code: string): string[] {
 	const violations = new Set<string>();
 	for (const { label, regex } of STATIC_PATTERNS) {
@@ -85,9 +83,9 @@ export function findRestrictedPatterns(code: string): string[] {
 	return [...violations];
 }
 
-export function assertNoRestrictedPatterns(code: string): void {
+export function assertNoRestrictedPatterns(code: string, subject?: string): void {
 	const violations = findRestrictedPatterns(code);
 	if (violations.length > 0) {
-		throw new PhpSafeModeViolationError(violations);
+		throw new PhpSafeModeViolationError(violations, subject);
 	}
 }

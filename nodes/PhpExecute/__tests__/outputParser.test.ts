@@ -1,15 +1,21 @@
 import {
 	parsePhpElements,
-	parsePhpOutput,
 	throwIfFatal,
 	toExecutionData,
 } from '../helpers/outputParser';
 import { PhpFatalError, PhpMemoryLimitError, PhpOutputParseError } from '../helpers/errors';
 
-describe('parsePhpOutput', () => {
+function parseItems(
+	stdout: string,
+	options: { itemIndex: number; strictJsonMode?: boolean },
+) {
+	return toExecutionData(parsePhpElements(stdout, options), options.itemIndex);
+}
+
+describe('parsePhpElements + toExecutionData composition', () => {
 	describe('valid JSON object', () => {
 		it('returns a single item with the parsed object as json', () => {
-			const items = parsePhpOutput('{"status":"ok","count":2}', { itemIndex: 3 });
+			const items = parseItems('{"status":"ok","count":2}', { itemIndex: 3 });
 
 			expect(items).toHaveLength(1);
 			expect(items[0].json).toEqual({ status: 'ok', count: 2 });
@@ -18,7 +24,7 @@ describe('parsePhpOutput', () => {
 
 	describe('valid JSON array', () => {
 		it('splits an array of objects into one item per element', () => {
-			const items = parsePhpOutput('[{"a":1},{"a":2}]', { itemIndex: 5 });
+			const items = parseItems('[{"a":1},{"a":2}]', { itemIndex: 5 });
 
 			expect(items).toHaveLength(2);
 			expect(items[0].json).toEqual({ a: 1 });
@@ -26,7 +32,7 @@ describe('parsePhpOutput', () => {
 		});
 
 		it('wraps scalar array elements in an output field', () => {
-			const items = parsePhpOutput('[1,"two",null,true]', { itemIndex: 0 });
+			const items = parseItems('[1,"two",null,true]', { itemIndex: 0 });
 
 			expect(items).toHaveLength(4);
 			expect(items[0].json).toEqual({ output: 1 });
@@ -38,7 +44,7 @@ describe('parsePhpOutput', () => {
 
 	describe('plain text output', () => {
 		it('wraps the raw text into an output field', () => {
-			const items = parsePhpOutput('Hello <world> & "friends"', { itemIndex: 0 });
+			const items = parseItems('Hello <world> & "friends"', { itemIndex: 0 });
 
 			expect(items).toHaveLength(1);
 			expect(items[0].json).toEqual({ output: 'Hello <world> & "friends"' });
@@ -47,8 +53,8 @@ describe('parsePhpOutput', () => {
 
 	describe('empty output', () => {
 		it('returns an empty string as output', () => {
-			const items = parsePhpOutput('', { itemIndex: 0 });
-			const itemsWhitespace = parsePhpOutput('   \n\t ', { itemIndex: 0 });
+			const items = parseItems('', { itemIndex: 0 });
+			const itemsWhitespace = parseItems('   \n\t ', { itemIndex: 0 });
 
 			expect(items[0].json).toEqual({ output: '' });
 			expect(itemsWhitespace[0].json).toEqual({ output: '' });
@@ -62,7 +68,7 @@ describe('parsePhpOutput', () => {
 			['true', { output: true }],
 			['null', { output: null }],
 		])('parses %s into typed output data', (stdout, expected) => {
-			const items = parsePhpOutput(stdout, { itemIndex: 0 });
+			const items = parseItems(stdout, { itemIndex: 0 });
 
 			expect(items[0].json).toEqual(expected);
 		});
@@ -71,16 +77,16 @@ describe('parsePhpOutput', () => {
 	describe('broken JSON with Strict JSON Mode enabled', () => {
 		it('throws a PhpOutputParseError mentioning strict mode', () => {
 			expect(() =>
-				parsePhpOutput('{not json', { itemIndex: 0, strictJsonMode: true }),
+				parseItems('{not json', { itemIndex: 0, strictJsonMode: true }),
 			).toThrow(PhpOutputParseError);
 
 			expect(() =>
-				parsePhpOutput('{not json', { itemIndex: 0, strictJsonMode: true }),
+				parseItems('{not json', { itemIndex: 0, strictJsonMode: true }),
 			).toThrow(/Strict JSON Mode/);
 		});
 
 		it('throws on empty output as well', () => {
-			expect(() => parsePhpOutput('', { itemIndex: 0, strictJsonMode: true })).toThrow(
+			expect(() => parseItems('', { itemIndex: 0, strictJsonMode: true })).toThrow(
 				PhpOutputParseError,
 			);
 		});
@@ -88,7 +94,7 @@ describe('parsePhpOutput', () => {
 
 	describe('broken JSON without Strict JSON Mode', () => {
 		it('falls back to wrapping the raw output', () => {
-			const items = parsePhpOutput('{not json', { itemIndex: 0 });
+			const items = parseItems('{not json', { itemIndex: 0 });
 
 			expect(items).toHaveLength(1);
 			expect(items[0].json).toEqual({ output: '{not json' });
@@ -97,9 +103,9 @@ describe('parsePhpOutput', () => {
 
 	describe('pairedItem', () => {
 		it('sets pairedItem to the given index on every returned item', () => {
-			const objectItems = parsePhpOutput('{"a":1}', { itemIndex: 7 });
-			const arrayItems = parsePhpOutput('[{"a":1},{"b":2}]', { itemIndex: 7 });
-			const fallbackItems = parsePhpOutput('plain', { itemIndex: 7 });
+			const objectItems = parseItems('{"a":1}', { itemIndex: 7 });
+			const arrayItems = parseItems('[{"a":1},{"b":2}]', { itemIndex: 7 });
+			const fallbackItems = parseItems('plain', { itemIndex: 7 });
 
 			for (const item of [...objectItems, ...arrayItems, ...fallbackItems]) {
 				expect(item.pairedItem).toEqual({ item: 7 });

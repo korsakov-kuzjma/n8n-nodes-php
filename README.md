@@ -192,7 +192,8 @@ The **Security Level** option controls how much the sandbox restricts executed c
 | | Restricted (default) | Unrestricted |
 | - | -------------------- | ------------ |
 | Shell functions (`exec`, `shell_exec`, `system`, `passthru`, `popen`, `proc_open`, …) | disabled via `disable_functions` | allowed |
-| Static analysis of the code before execution | blocks shell calls, backticks and remote URL fetchers | skipped |
+| Network primitives (`fsockopen`, `stream_socket_*`, `curl_init`/`curl_exec`, `socket_create`, …) | disabled via `disable_functions` | allowed |
+| Static analysis of the code before execution | blocks shell calls, backticks and remote URL fetchers (in the main code **and** additional files) | skipped |
 | Remote file access (`allow_url_fopen` / `allow_url_include`) | disabled | follows php.ini |
 | File access scope | sandbox directory (+ Composer vendor dir if configured) | unrestricted |
 | OS user | drops to `nobody` when n8n runs as root | n8n process user |

@@ -31,11 +31,13 @@ const DEFAULT_CODE =
 	'<?php\necho json_encode(["status" => "success", "input" => $n8nInput]);';
 
 interface CachePayload {
-	parsed: ParsedPhpOutput;
+	stdout: string;
 	metrics: PhpMetrics | null;
 }
 
 const resultCache = new TtlCache(100);
+
+const MAX_CACHED_OUTPUT_BYTES = 1024 * 1024;
 
 async function existingFile(path: string): Promise<boolean> {
 	try {
@@ -156,8 +158,7 @@ export class PhpExecute implements INodeType {
 				{
 					name: 'Run Once for All Items',
 					value: 'batch',
-					description:
-						'Spawn a single PHP process for all items; iterate over $n8nItems and echo an array of results',
+					description: 'Spawn a single PHP process for all items; iterate over $n8nItems and echo an array of results. If the JSON array length differs from the input count, every output item is paired with the first input item.',
 				},
 				{
 					name: 'Run Once for Each Item',
@@ -216,6 +217,7 @@ export class PhpExecute implements INodeType {
 				type: 'collection',
 				placeholder: 'Add option',
 				default: {},
+				description: 'Advanced settings. Evaluated once per node execution — expressions in options resolve against the first input item.',
 			options: [
 				{
 					displayName: 'Composer Autoload Path',
@@ -255,8 +257,7 @@ export class PhpExecute implements INodeType {
 						numberPrecision: 0,
 					},
 					default: 0,
-					description:
-						'Cache identical executions for this many seconds, keyed by a SHA-256 hash of code + input payload (0 disables caching)',
+					description: 'Cache identical executions for this many seconds, keyed by a SHA-256 hash of code + input payload (0 disables caching). Outputs larger than 1 MB are not cached.',
 				},
 				{
 					displayName: 'Security Level',
@@ -330,7 +331,9 @@ export class PhpExecute implements INodeType {
 		const isBatch = options.executionMode === 'batch';
 		if (restricted) {
 			try {
-				assertNoRestrictedPatterns(String(this.getNodeParameter('phpCode', 0, '')));
+				for (const file of options.additionalFiles) {
+					assertNoRestrictedPatterns(file.content, `additional file "${file.name}"`);
+				}
 			} catch (error) {
 				throw new NodeOperationError(this.getNode(), error as Error);
 			}
@@ -365,6 +368,9 @@ export class PhpExecute implements INodeType {
 			let metrics: PhpMetrics | null = null;
 			try {
 				const phpCode = String(this.getNodeParameter('phpCode', itemIndex, ''));
+				if (restricted) {
+					assertNoRestrictedPatterns(phpCode);
+				}
 				const injectionMethod = this.getNodeParameter(
 					'dataInjectionMethod',
 					itemIndex,
@@ -405,12 +411,7 @@ export class PhpExecute implements INodeType {
 					if (result.exitCode !== 0) {
 						throw buildNonZeroExitError(result.exitCode, result.stderr, result.stdout);
 					}
-					return {
-						parsed: parsePhpElements(result.stdout, {
-							strictJsonMode: options.strictJsonMode,
-						}),
-						metrics: runMetrics,
-					};
+					return { stdout: result.stdout, metrics: runMetrics };
 				};
 
 				let cachePayload: CachePayload | undefined;
@@ -419,7 +420,10 @@ export class PhpExecute implements INodeType {
 				}
 				if (!cachePayload) {
 					cachePayload = await runFresh();
-					if (options.resultCacheTtlSeconds > 0) {
+					if (
+						options.resultCacheTtlSeconds > 0 &&
+						Buffer.byteLength(cachePayload.stdout) <= MAX_CACHED_OUTPUT_BYTES
+					) {
 						resultCache.set(cacheKey, cachePayload, options.resultCacheTtlSeconds * 1000);
 					}
 				} else {
@@ -427,7 +431,16 @@ export class PhpExecute implements INodeType {
 				}
 				metrics = cachePayload.metrics;
 
-				returnData.push(...pairOutputs(cachePayload.parsed, itemIndex, items.length, isBatch));
+				returnData.push(
+					...pairOutputs(
+						parsePhpElements(cachePayload.stdout, {
+							strictJsonMode: options.strictJsonMode,
+						}),
+						itemIndex,
+						items.length,
+						isBatch,
+					),
+				);
 			} catch (error) {
 				if (this.continueOnFail()) {
 					returnData.push({

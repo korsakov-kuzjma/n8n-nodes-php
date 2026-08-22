@@ -101,10 +101,3 @@ export function toExecutionData(parsed: ParsedPhpOutput, itemIndex: number): INo
 		pairedItem: { item: itemIndex },
 	}));
 }
-
-export function parsePhpOutput(
-	stdout: string,
-	options: { itemIndex: number; strictJsonMode?: boolean },
-): INodeExecutionData[] {
-	return toExecutionData(parsePhpElements(stdout, options), options.itemIndex);
-}
