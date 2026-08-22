@@ -51,13 +51,20 @@ Always run `npm run lint && npm run build` before committing.
 
 ## Release process
 
-1. Bump `version` in `package.json`.
+1. Bump `version` in `package.json` and keep it **identical to the future tag name** — npm publishes whatever `package.json` contains; the tag is only the trigger and is not validated against it.
 2. Add a `CHANGELOG.md` section (`## X.Y.Z - date`) above previous ones.
 3. Update the "Version history" list in **both** `README.md` and `README.ru.md`.
 4. `npm run lint && npm run build`, commit (`Release X.Y.Z`), tag (`X.Y.Z`), push branch + tag.
 5. CI does the rest: npm publish with provenance + GitHub Release created from the changelog section. Verify via `npm view <pkg> versions` and the Actions tab.
 
 Do not create releases without being asked.
+
+Publishing mechanics (avoid surprises):
+
+- The **only** publish trigger is pushing a bare-semver tag (`*.*.*`). There is no `workflow_dispatch` button and no sanctioned local publish path.
+- Pushes to `master`/PRs run check-only CI — nothing ever reaches npm from them.
+- Creating a GitHub Release manually does not publish anything; the Release object is produced by the same tag-triggered workflow after a successful npm publish.
+- npm rejects duplicate versions ("cannot publish over previously published version"). A tag can only be retried by deleting and re-pushing it, which re-runs the workflow but still cannot overwrite a published version. The GitHub Release step is idempotent: it skips when the release already exists.
 
 ## Environment notes
 
