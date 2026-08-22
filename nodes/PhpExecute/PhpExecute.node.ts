@@ -1,85 +1,38 @@
 import {
 	IExecuteFunctions,
-	IDataObject,
 	INodeExecutionData,
 	INodeType,
 	INodeTypeDescription,
 	NodeConnectionTypes,
 	NodeOperationError,
 } from 'n8n-workflow';
-import { spawn } from 'child_process';
-import { mkdtemp, rm, writeFile } from 'fs/promises';
+import { access, mkdtemp, rm, writeFile } from 'fs/promises';
 import { tmpdir } from 'os';
 import { join } from 'path';
+import { buildPhpArgs, runPhpProcess } from './helpers/phpProcess';
+import { parsePhpOutput } from './helpers/outputParser';
+import {
+	DATA_INJECTION_METHODS,
+	type DataInjectionMethod,
+	type PhpExecuteOptions,
+} from './interfaces';
 
 const DEFAULT_TIMEOUT_SECONDS = 30;
+const DEFAULT_PHP_BINARY = 'php';
+const DEFAULT_MEMORY_LIMIT_MB = 128;
 
-function isJsonObject(value: unknown): value is IDataObject {
-	return typeof value === 'object' && value !== null && !Array.isArray(value);
+function positiveNumber(value: unknown, fallback: number): number {
+	return typeof value === 'number' && Number.isFinite(value) && value > 0 ? value : fallback;
 }
 
-function toOutputItems(stdout: string, itemIndex: number): INodeExecutionData[] {
-	let parsed: unknown = undefined;
+async function existingFile(path: string | undefined): Promise<string | null> {
+	if (!path || !path.trim()) return null;
 	try {
-		parsed = JSON.parse(stdout) as unknown;
+		await access(path);
+		return path;
 	} catch {
-		parsed = undefined;
+		return null;
 	}
-	if (Array.isArray(parsed)) {
-		return parsed.map((element) => ({
-			json: isJsonObject(element) ? element : { output: element },
-			pairedItem: { item: itemIndex },
-		}));
-	}
-	if (isJsonObject(parsed)) {
-		return [{ json: parsed, pairedItem: { item: itemIndex } }];
-	}
-	return [{ json: { output: stdout }, pairedItem: { item: itemIndex } }];
-}
-
-function runPhpProcess(filePath: string, timeoutMs: number): Promise<string> {
-	return new Promise((resolve, reject) => {
-		const php = spawn('php', [filePath]);
-		let stdout = '';
-		let stderr = '';
-		let settled = false;
-
-		const timer = setTimeout(() => {
-			settled = true;
-			php.kill('SIGKILL');
-			reject(new Error(`PHP execution timed out after ${timeoutMs / 1000} s`));
-		}, timeoutMs);
-
-		php.stdout.on('data', (chunk) => {
-			stdout += chunk.toString();
-		});
-		php.stderr.on('data', (chunk) => {
-			stderr += chunk.toString();
-		});
-
-		php.on('error', (error) => {
-			clearTimeout(timer);
-			if (settled) return;
-			settled = true;
-			const message =
-				(error as NodeJS.ErrnoException).code === 'ENOENT'
-					? 'PHP binary not found. Install the PHP CLI and make sure "php" is available in PATH.'
-					: error.message;
-			reject(new Error(message));
-		});
-
-		php.on('close', (code) => {
-			clearTimeout(timer);
-			if (settled) return;
-			settled = true;
-			if (code !== 0) {
-				const details = stderr.trim() || stdout.trim();
-				reject(new Error(`PHP exited with code ${code}${details ? `: ${details}` : ''}`));
-			} else {
-				resolve(stdout);
-			}
-		});
-	});
 }
 
 export class PhpExecute implements INodeType {
@@ -107,8 +60,30 @@ export class PhpExecute implements INodeType {
 					editor: 'codeNodeEditor',
 				},
 				default:
-					'<?php\n$data = ["status" => "success", "time" => time()];\necho json_encode($data);',
-				description: 'The PHP code to execute. Use echo to return data to n8n.',
+					'<?php\n$input = json_decode(file_get_contents("php://stdin"), true);\necho json_encode(["status" => "success", "input" => $input]);',
+				description:
+					'The PHP code to execute. Use echo to return data to n8n. The current item JSON arrives via STDIN unless another injection method is selected.',
+			},
+			{
+				displayName: 'Data Injection Method',
+				name: 'dataInjectionMethod',
+				type: 'options',
+				default: 'stdin',
+				options: [
+					{
+						name: 'Handlebars (Legacy)',
+						value: DATA_INJECTION_METHODS.HANDLEBARS,
+						description:
+							'Interpolate item fields into the code with n8n expressions (e.g. the email field) before execution',
+					},
+					{
+						name: 'STDIN',
+						value: DATA_INJECTION_METHODS.STDIN,
+						description:
+							'Pass the current item data to the PHP process via standard input. Safe for any special characters. Read it from php://stdin in your script',
+					},
+				],
+				description: 'How the incoming item data is made available to the PHP script',
 			},
 			{
 				displayName: 'Options',
@@ -118,6 +93,46 @@ export class PhpExecute implements INodeType {
 				default: {},
 				options: [
 					{
+						displayName: 'Composer Autoload Path',
+						name: 'composerAutoloadPath',
+						type: 'string',
+						default: '',
+						placeholder: '/var/www/app/vendor/autoload.php',
+						description:
+							'Path to a Composer vendor/autoload.php, prepended via auto_prepend_file. Ignored if the file does not exist.',
+					},
+					{
+						displayName: 'Memory Limit (MB)',
+						name: 'memoryLimit',
+						type: 'number',
+						typeOptions: {
+							minValue: 1,
+						},
+						default: DEFAULT_MEMORY_LIMIT_MB,
+						description: 'PHP memory_limit in megabytes applied to the executed script',
+					},
+					{
+						displayName: 'PHP Binary Path',
+						name: 'phpBinaryPath',
+						type: 'string',
+						default: DEFAULT_PHP_BINARY,
+						description: 'Path to the PHP CLI binary, e.g. /usr/bin/php8.3',
+					},
+					{
+						displayName: 'Safe Mode',
+						name: 'safeMode',
+						type: 'boolean',
+						default: false,
+						description: 'Whether to disable executable functions (exec, shell_exec, system, passthru, popen, proc_open) and restrict file access to the temporary script directory via open_basedir',
+					},
+					{
+						displayName: 'Strict JSON Mode',
+						name: 'strictJsonMode',
+						type: 'boolean',
+						default: false,
+						description: 'Whether to fail when the output is not valid JSON instead of returning it wrapped as { output }',
+					},
+					{
 						displayName: 'Timeout (Seconds)',
 						name: 'timeout',
 						type: 'number',
@@ -125,7 +140,7 @@ export class PhpExecute implements INodeType {
 							minValue: 1,
 						},
 						default: DEFAULT_TIMEOUT_SECONDS,
-						description: 'Maximum execution time before the PHP process is killed',
+						description: 'Maximum execution time before the PHP process receives SIGTERM (followed by SIGKILL after 2 s)',
 					},
 				],
 			},
@@ -139,15 +154,43 @@ export class PhpExecute implements INodeType {
 		for (let i = 0; i < items.length; i++) {
 			try {
 				const phpCode = this.getNodeParameter('phpCode', i) as string;
-				const options = this.getNodeParameter('options', i, {}) as IDataObject;
-				const timeoutSeconds = (options.timeout as number) ?? DEFAULT_TIMEOUT_SECONDS;
+				const injectionMethod = this.getNodeParameter(
+					'dataInjectionMethod',
+					i,
+					DATA_INJECTION_METHODS.STDIN,
+				) as DataInjectionMethod;
+				const options = this.getNodeParameter('options', i, {}) as PhpExecuteOptions;
+
+				const binaryPath =
+					typeof options.phpBinaryPath === 'string' && options.phpBinaryPath.trim()
+						? options.phpBinaryPath.trim()
+						: DEFAULT_PHP_BINARY;
+				const timeoutMs =
+					positiveNumber(options.timeout, DEFAULT_TIMEOUT_SECONDS) * 1000;
+				const strictJsonMode = options.strictJsonMode === true;
+				const safeMode = options.safeMode === true;
+				const memoryLimitMb = positiveNumber(options.memoryLimit, DEFAULT_MEMORY_LIMIT_MB);
+				const composerAutoloadPath = await existingFile(options.composerAutoloadPath);
 
 				const tempDir = await mkdtemp(join(tmpdir(), 'n8n-php-'));
 				try {
 					const tempFilePath = join(tempDir, 'script.php');
 					await writeFile(tempFilePath, phpCode, 'utf-8');
-					const stdout = await runPhpProcess(tempFilePath, timeoutSeconds * 1000);
-					returnData.push(...toOutputItems(stdout.trim(), i));
+					const args = buildPhpArgs({ safeMode, memoryLimitMb, composerAutoloadPath }, tempDir);
+					const stdinData =
+						injectionMethod === DATA_INJECTION_METHODS.STDIN
+							? JSON.stringify(items[i].json ?? {})
+							: null;
+					const result = await runPhpProcess({
+						binaryPath,
+						scriptPath: tempFilePath,
+						args,
+						timeoutMs,
+						stdinData,
+					});
+					returnData.push(
+						...parsePhpOutput(result.stdout, { itemIndex: i, strictJsonMode }),
+					);
 				} finally {
 					await rm(tempDir, { recursive: true, force: true });
 				}

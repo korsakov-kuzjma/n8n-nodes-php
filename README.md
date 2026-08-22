@@ -46,9 +46,25 @@ The node writes your code to a temporary file, executes it with `php <file>`, ca
 - Otherwise it is wrapped as `{ "output": "<text>" }`.
 - If the process exits with a non-zero code, the node throws an error containing stderr (or pushes `{ "error": ... }` when *Continue On Fail* is enabled).
 
+### Data injection method
+
+Choose how the current item's data reaches the script via **Data Injection Method**:
+
+- **STDIN** (default): the item JSON is piped to the process standard input. It is safe for any characters and requires no escaping.
+- **Handlebars (Legacy)**: interpolate values into the code with n8n expressions like `{{ $json.email }}` before execution.
+
 ### Options
 
-- **Timeout (Seconds)**: maximum execution time before the PHP process is killed. Defaults to 30 seconds; set it in the *Options* collection of the node.
+| Option | Default | Description |
+| ------ | ------- | ----------- |
+| Timeout (Seconds) | `30` | Maximum execution time. On timeout the process receives SIGTERM first and is force-killed only after a 2-second grace period. |
+| PHP Binary Path | `php` | Path to the PHP CLI binary, e.g. `/usr/bin/php8.3`. |
+| Strict JSON Mode | off | Fail when the output cannot be parsed as JSON instead of wrapping it in `{ output }`. |
+| Composer Autoload Path | empty | Prepends `vendor/autoload.php` via `auto_prepend_file`; ignored when the file does not exist. |
+| Safe Mode | off | Disables `exec`, `shell_exec`, `system`, `passthru`, `popen`, `proc_open` and restricts file access to the temporary script directory (`open_basedir`). |
+| Memory Limit (MB) | `128` | Applies `-d memory_limit=<n>M` to the executed script. |
+
+Captured stdout and stderr are capped at 10 MB each; exceeding the cap kills the process and returns an error.
 
 ## Credentials
 
@@ -90,14 +106,32 @@ echo "Hello from PHP at " . date('H:i');
 
 Result: one item `{ "output": "Hello from PHP at 14:05" }`.
 
-### Access incoming data
+### Receive incoming data via STDIN (default)
 
-Use standard n8n expressions in the code field, e.g. `{{ $json.email }}`, to interpolate values before execution:
+By default the current item's JSON is piped to the script through standard input. Read it with `php://stdin` — no escaping needed, safe for quotes and any special characters:
+
+```php
+<?php
+$input = json_decode(file_get_contents('php://stdin'), true);
+echo json_encode(["status" => "ok", "data" => $input]);
+```
+
+For an incoming item `{ "email": "a\"b@c.ru" }` the result is:
+
+```json
+{ "status": "ok", "data": { "email": "a\"b@c.ru" } }
+```
+
+### Access incoming data via expressions (legacy)
+
+Set **Data Injection Method → Handlebars (Legacy)** and use standard n8n expressions in the code field, e.g. `{{ $json.email }}`, to interpolate values before execution:
 
 ```php
 <?php
 echo json_encode(["greeting" => "Hello, {{ $json.name }}"]);
 ```
+
+> Note: interpolated values are pasted into the PHP source as-is; quotes inside data can break the code. Prefer STDIN.
 
 ## Resources
 
@@ -105,6 +139,19 @@ echo json_encode(["greeting" => "Hello, {{ $json.name }}"]);
 * [PHP documentation](https://www.php.net/docs.php)
 
 ## Version history
+
+### 1.0.0
+
+- **Data Injection Method**: the current item JSON is passed to PHP via STDIN by default — safe for any characters, no escaping required. Legacy n8n-expression interpolation remains available as *Handlebars (Legacy)*.
+- **PHP Binary Path** option to point at a specific CLI binary (default `php`).
+- **Strict JSON Mode**: fail on non-JSON output instead of wrapping it as `{ output }`.
+- **Composer Autoload Path** option: prepends a `vendor/autoload.php` via `auto_prepend_file` when the file exists.
+- **Safe Mode** option: disables executable functions (`exec`, `shell_exec`, `system`, `passthru`, `popen`, `proc_open`) and confines file access to the temporary script directory (`open_basedir`).
+- **Memory Limit (MB)** option (default 128) applied via `-d memory_limit`.
+- Graceful shutdown on timeout: SIGTERM first, SIGKILL only after a 2-second grace period.
+- Captured stdout/stderr capped at 10 MB with a clear error when exceeded.
+- Refactored into dedicated process-management and output-parsing helpers; added a Jest test suite.
+- Hardened item mapping so every returned item always carries a valid `pairedItem` reference.
 
 ### 0.3.0
 

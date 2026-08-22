@@ -2,6 +2,29 @@
 
 All notable changes to this project will be documented in this file.
 
+## 1.0.0 - 2026-08-22
+
+### Added
+
+- **Data Injection Method** property: the current item JSON is piped to PHP via STDIN by default (read it with `json_decode(file_get_contents('php://stdin'), true)`), safe for quotes and any special characters; legacy n8n-expression interpolation remains available as *Handlebars (Legacy)*.
+- **PHP Binary Path** option to point at a specific CLI binary (default `php`).
+- **Strict JSON Mode** option: fail when stdout cannot be parsed as JSON instead of wrapping it as `{ output }`.
+- **Composer Autoload Path** option: prepends `vendor/autoload.php` via `auto_prepend_file` when the file exists.
+- **Safe Mode** option: disables executable functions (`exec`, `shell_exec`, `system`, `passthru`, `popen`, `proc_open`) and restricts file access to the temporary script directory (`open_basedir`).
+- **Memory Limit (MB)** option (default 128) applied via `-d memory_limit=<n>M`.
+- Graceful shutdown on timeout: SIGTERM first, SIGKILL only after a 2-second grace period.
+- Captured stdout/stderr capped at 10 MB each; exceeding the cap kills the process and returns a clear error.
+- Jest test suite: output-parser unit tests and real-process integration tests (success, STDIN delivery, timeout/SIGTERM escalation, ENOENT, non-zero exit, output limit).
+
+### Changed
+
+- Refactored the monolithic node into dedicated modules: process management (`helpers/phpProcess.ts`), output parsing (`helpers/outputParser.ts`), shared types (`interfaces.ts`).
+- The default code snippet now demonstrates reading STDIN.
+
+### Fixed
+
+- Item mapping no longer references an undeclared variable, so plain-text output items always carry a valid `pairedItem` reference instead of crashing the workflow with a `ReferenceError`.
+
 ## 0.3.0 - 2026-08-22
 
 ### Added
