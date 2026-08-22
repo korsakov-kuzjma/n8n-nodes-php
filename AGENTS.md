@@ -8,16 +8,21 @@ Instructions for AI coding agents working in this repository.
 
 ## Commands
 
+Requires Node.js ≥ 22 for development; the esbuild bundle targets `node22`.
+
 ```bash
 npm ci            # install dependencies
 npm run build     # tsc + esbuild bundle of zod into dist/ (must succeed)
 npm run lint      # eslint incl. @n8n/community-nodes rules (must pass with 0 errors)
 npm run lint:fix  # autofix where possible
 npm test          # jest suite (unit + real-process integration tests)
+npm test -- cache.test.ts   # single suite by filename substring
 npm run dev       # scratch n8n instance with the node loaded
 ```
 
-A local `php` CLI is required to exercise runtime behavior (`php -v`). When changing execution logic beyond what the jest suite covers, smoke-test manually (require the built `dist/nodes/PhpExecute/PhpExecute.node.js`, call `execute()` with a stubbed context, verify items/errors/sandbox cleanup).
+**CI runs only lint + build — tests never run there** (neither in `ci.yml` nor in the publish workflow), so a broken suite stays invisible until you run `npm test` locally.
+
+A local `php` CLI is required to exercise runtime behavior (`php -v`). When changing execution logic beyond what the jest suite covers, smoke-test manually (require the built `dist/nodes/PhpExecute/PhpExecute.node.js`, call `execute()` with a stubbed context, verify items/errors/sandbox cleanup). A few sandbox/privilege-drop tests self-skip when the local PHP lacks the `pcntl` extension (`php -m`) — skips are expected, not failures.
 
 Always run `npm run lint && npm test && npm run build` before committing.
 
@@ -45,7 +50,7 @@ Always run `npm run lint && npm test && npm run build` before committing.
 - The `prepublishOnly` script intentionally blocks bare `npm publish` (exits unless `RELEASE_MODE=true`). Publishing happens through CI on tag push. Do not bypass it except as an explicit emergency fallback.
 - Tags are bare semver (`0.3.0`, no `v` prefix) — the publish workflow trigger depends on it.
 - Execution is fully in-memory: user code goes to the PHP process's STDIN (bootstrap preamble + user code in one stream), payload JSON goes to an extra pipe (fd 3). Never reintroduce temp script files.
-- Community lint rules forbid runtime dependencies; `zod` must therefore stay bundled by `scripts/bundle.mjs` and must not appear in `dependencies`/`peerDependencies` (only `n8n-workflow` is allowed as a peer).
+- Community lint rules forbid runtime dependencies; `zod` must therefore stay bundled by `scripts/bundle.mjs` and must not appear in `dependencies`/`peerDependencies` (only `n8n-workflow` is allowed as a peer). Note: `zod` is not even a direct devDependency — TypeScript resolves it through the lockfile from transitive sources, so a dependency-tree change can break imports silently.
 - The sandbox directory (`os.tmpdir()/n8n-php-sandbox`) persists between runs so additional files can be reused; spawned processes have a timeout that sends SIGTERM then SIGKILL after a grace period. Preserve both behaviors.
 - Restricted mode is the default Security Level; legacy `safeMode` boolean maps onto it. Do not weaken `disable_functions`, `open_basedir`, or static analysis without an explicit request.
 
@@ -75,6 +80,7 @@ Do not create releases without being asked.
 Publishing mechanics (avoid surprises):
 
 - The **only** publish trigger is pushing a bare-semver tag (`*.*.*`). There is no `workflow_dispatch` button and no sanctioned local publish path.
+- `npm run release` (release-it) exists but is deliberately unused here: locally it requires branch `main` (`--git.requireBranch main`; this repo works on `master`) and regenerates `CHANGELOG.md` from commit messages via auto-changelog, destroying the curated format. Follow the manual steps above. In CI (`GITHUB_ACTIONS` set) the same script skips release-it and just runs lint + build + `npm publish`.
 - Pushes to `master`/PRs run check-only CI — nothing ever reaches npm from them.
 - Creating a GitHub Release manually does not publish anything; the Release object is produced by the same tag-triggered workflow after a successful npm publish.
 - npm rejects duplicate versions ("cannot publish over previously published version"). A tag can only be retried by deleting and re-pushing it, which re-runs the workflow but still cannot overwrite a published version. The GitHub Release step is idempotent: it skips when the release already exists.
