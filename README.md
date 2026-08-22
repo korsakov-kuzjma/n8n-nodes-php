@@ -1,5 +1,7 @@
 # n8n-nodes-php
 
+**English** | [Русский](README.ru.md)
+
 This is an [n8n](https://n8n.io/) community node. It lets you execute arbitrary **PHP** code directly in your n8n workflows.
 
 [n8n](https://n8n.io/) is a [fair-code licensed](https://docs.n8n.io/reference/license/) workflow automation platform.
@@ -103,6 +105,10 @@ echo json_encode(["greeting" => "Hello, {{ $json.name }}"]);
 * [PHP documentation](https://www.php.net/docs.php)
 
 ## Version history
+
+### 0.3.0
+
+- Russian documentation (README.ru.md).
 
 ### 0.2.0
 

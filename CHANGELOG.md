@@ -2,6 +2,12 @@
 
 All notable changes to this project will be documented in this file.
 
+## 0.3.0 - 2026-08-22
+
+### Added
+
+- Russian documentation (README.ru.md).
+
 ## 0.2.0 - 2026-08-22
 
 ### Added

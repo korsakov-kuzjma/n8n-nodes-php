@@ -1,6 +1,6 @@
 {
   "name": "n8n-nodes-php",
-	"version": "0.2.0",
+	"version": "0.3.0",
   "description": "Community node to execute arbitrary PHP code in n8n workflows",
   "license": "MIT",
   "author": {
