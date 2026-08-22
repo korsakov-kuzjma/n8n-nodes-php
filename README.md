@@ -44,6 +44,10 @@ The node writes your code to a temporary file, executes it with `php <file>`, ca
 - Otherwise it is wrapped as `{ "output": "<text>" }`.
 - If the process exits with a non-zero code, the node throws an error containing stderr (or pushes `{ "error": ... }` when *Continue On Fail* is enabled).
 
+### Options
+
+- **Timeout (Seconds)**: maximum execution time before the PHP process is killed. Defaults to 30 seconds; set it in the *Options* collection of the node.
+
 ## Credentials
 
 None required. The node uses the PHP binary available locally.

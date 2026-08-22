@@ -1,54 +1,41 @@
 {
-	"name": "n8n-nodes-php",
-	"version": "0.1.0",
-	"description": "Community node для выполнения произвольного PHP-кода в n8n",
-	"license": "MIT",
-	"homepage": "",
-	"author": {
-		"name": "korsakov-kuzjma",
-		"email": "korsakov.kuzjma@gmail.com",
-		"url": "https://github.com/korsakov-kuzjma"
-	},
-	"repository": {
-		"type": "git",
-		"url": "git+https://github.com/korsakov-kuzjma/n8n-nodes-php.git"
-	},
-	"homepage": "https://github.com/korsakov-kuzjma/n8n-nodes-php#readme",
-	"keywords": [
-		"n8n-community-node-package",
-		"n8n",
-		"php",
-		"code",
-		"execute"
-	],
-	"scripts": {
-		"build": "n8n-node build",
-		"build:watch": "tsc --watch",
-		"dev": "n8n-node dev",
-		"lint": "n8n-node lint",
-		"lint:fix": "n8n-node lint --fix",
-		"release": "n8n-node release",
-		"prepublishOnly": "n8n-node prerelease"
-	},
-	"files": [
-		"dist"
-	],
-	"n8n": {
-		"n8nNodesApiVersion": 1,
-		"strict": true,
-		"credentials": [],
-		"nodes": [
-			"dist/nodes/Php/Php.node.js"
-		]
-	},
-	"devDependencies": {
-		"@n8n/node-cli": "*",
-		"eslint": "9.29.0",
-		"prettier": "3.8.3",
-		"release-it": "20.2.0",
-		"typescript": "5.9.3"
-	},
-	"peerDependencies": {
-		"n8n-workflow": "*"
-	}
+  "name": "n8n-nodes-php",
+  "version": "0.1.0",
+  "description": "Community node to execute arbitrary PHP code in n8n workflows",
+  "license": "MIT",
+  "author": {
+    "name": "korsakov-kuzjma",
+    "email": "korsakov.kuzjma@gmail.com",
+    "url": "https://github.com/korsakov-kuzjma"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/korsakov-kuzjma/n8n-nodes-php.git"
+  },
+  "homepage": "https://github.com/korsakov-kuzjma/n8n-nodes-php#readme",
+  "keywords": ["n8n-community-node-package", "n8n", "php", "code", "execute"],
+  "scripts": {
+    "build": "n8n-node build",
+    "build:watch": "tsc --watch",
+    "dev": "n8n-node dev",
+    "lint": "n8n-node lint",
+    "lint:fix": "n8n-node lint --fix",
+    "release": "n8n-node release",
+    "prepublishOnly": "n8n-node prerelease"
+  },
+  "files": ["dist"],
+  "n8n": {
+    "n8nNodesApiVersion": 1,
+    "strict": false,
+    "credentials": [],
+    "nodes": ["dist/nodes/PhpExecute/PhpExecute.node.js"]
+  },
+  "devDependencies": {
+    "@n8n/node-cli": "*",
+    "eslint": "9.29.0",
+    "prettier": "3.8.3",
+    "release-it": "20.2.0",
+    "typescript": "5.9.3"
+  },
+  "peerDependencies": { "n8n-workflow": "*" }
 }

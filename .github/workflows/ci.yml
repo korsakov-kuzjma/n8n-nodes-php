@@ -5,6 +5,7 @@ on:
   push:
     branches:
       - main
+      - master
 
 # Cancel in-progress runs for the same branch/PR to avoid wasting CI minutes.
 concurrency:
