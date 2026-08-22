@@ -7,6 +7,10 @@ export const DATA_INJECTION_METHODS: Record<'STDIN' | 'HANDLEBARS', DataInjectio
 	HANDLEBARS: 'handlebars',
 };
 
+export type ExecutionMode = 'item-by-item' | 'batch';
+
+export type SecurityLevel = 'restricted' | 'unrestricted';
+
 export interface PhpExecuteOptions extends IDataObject {
 	timeout?: number;
 	phpBinaryPath?: string;
@@ -14,30 +18,36 @@ export interface PhpExecuteOptions extends IDataObject {
 	composerAutoloadPath?: string;
 	safeMode?: boolean;
 	memoryLimit?: number;
+	executionMode?: ExecutionMode;
+	securityLevel?: SecurityLevel;
+	resultCacheTtlSeconds?: number;
+	additionalFiles?: Array<{ name: string; content: string }>;
 }
 
-export interface ResolvedNodeOptions {
-	phpCode: string;
-	injectionMethod: DataInjectionMethod;
+export interface ValidatedNodeOptions {
 	binaryPath: string;
 	timeoutMs: number;
+	memoryLimitMb: number;
+	executionMode: ExecutionMode;
+	securityLevel: SecurityLevel;
 	strictJsonMode: boolean;
-	composerAutoloadPath: string | null;
-	safeMode: boolean;
-	memoryLimitMb: number | null;
+	composerAutoloadPath: string;
+	resultCacheTtlSeconds: number;
+	additionalFiles: Array<{ name: string; content: string }>;
 }
 
-export interface PhpRunResult {
-	stdout: string;
-	stderr: string;
-	exitCode: number | null;
+export interface N8nContextInfo {
+	nodeName: string;
+	nodeId: string;
+	workflowId: string;
+	workflowName: string;
+	runIndex: number;
+	executionId: string;
+	mode: string;
 }
 
-export interface SpawnPhpOptions {
-	filePath: string;
-	args: string[];
-	binaryPath: string;
-	timeoutMs: number;
-	stdinData: string | null;
-	maxOutputBytes: number;
+export interface PayloadDescriptor {
+	itemsJson: string;
+	contextJson: string;
+	cacheKeySeed: string;
 }

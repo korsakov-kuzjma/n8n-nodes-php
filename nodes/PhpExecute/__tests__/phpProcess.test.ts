@@ -1,42 +1,24 @@
 import { execFileSync } from 'child_process';
 import type { ChildProcessWithoutNullStreams } from 'child_process';
 import { EventEmitter } from 'events';
-import { readFile, mkdtemp, rm, writeFile } from 'fs/promises';
+import { mkdtempSync, readFileSync, rmSync } from 'fs';
 import { tmpdir } from 'os';
 import { join } from 'path';
 import {
+	buildNonZeroExitError,
 	buildPhpArgs,
-	OutputLimitExceededError,
 	runPhpProcess,
 } from '../helpers/phpProcess';
+import { buildInjectedCode } from '../helpers/bootstrap';
+import {
+	PhpBinaryNotFoundError,
+	PhpProcessError,
+	PhpTimeoutError,
+	OutputLimitExceededError,
+} from '../helpers/errors';
 
 const sleep = (ms: number): Promise<void> =>
 	new Promise((resolve) => setTimeout(resolve, ms));
-
-async function createScript(code: string): Promise<{ dir: string; path: string }> {
-	const dir = await mkdtemp(join(tmpdir(), 'n8n-php-test-'));
-	const path = join(dir, 'script.php');
-	await writeFile(path, code, 'utf8');
-	return { dir, path };
-}
-
-async function removeDir(dir: string): Promise<void> {
-	await rm(dir, { recursive: true, force: true });
-}
-
-async function readMarkerWhenReady(path: string, timeoutMs = 3000): Promise<string | undefined> {
-	const deadline = Date.now() + timeoutMs;
-	for (;;) {
-		try {
-			return await readFile(path, 'utf8');
-		} catch {
-			if (Date.now() > deadline) {
-				return undefined;
-			}
-			await sleep(25);
-		}
-	}
-}
 
 const hasPcntl = (() => {
 	try {
@@ -56,10 +38,17 @@ function createFakeStream(): FakeStream {
 	return stream;
 }
 
+interface FakePayloadStream {
+	write: jest.Mock;
+	end: jest.Mock;
+	on: jest.Mock;
+}
+
 interface FakeChild {
 	child: ChildProcessWithoutNullStreams;
 	raw: EventEmitter;
 	kill: jest.Mock;
+	payloadStdin: FakePayloadStream;
 }
 
 function createFakeChild(): FakeChild {
@@ -67,175 +56,179 @@ function createFakeChild(): FakeChild {
 	const kill = jest.fn();
 	const stdout = createFakeStream();
 	const stderr = createFakeStream();
-	const stdin = {
-		writable: true,
-		on: jest.fn(),
-		write: jest.fn(),
-		end: jest.fn(),
-	};
-	const child = Object.assign(raw, { stdout, stderr, stdin, kill }) as unknown as ChildProcessWithoutNullStreams;
-	return { child, raw, kill };
+	const stdin = { writable: true, on: jest.fn(), write: jest.fn(), end: jest.fn() };
+	const payloadStdin: FakePayloadStream = { write: jest.fn(), end: jest.fn(), on: jest.fn() };
+	const child = Object.assign(raw, {
+		stdout,
+		stderr,
+		stdin,
+		stdio: [stdin, stdout, stderr, payloadStdin],
+		kill,
+	}) as unknown as ChildProcessWithoutNullStreams;
+	return { child, raw, kill, payloadStdin };
 }
 
 describe('buildPhpArgs', () => {
-	it('returns an empty array by default', () => {
-		expect(buildPhpArgs({ safeMode: false, memoryLimitMb: null, composerAutoloadPath: null }, '/tmp/x')).toEqual([]);
-	});
-
-	it('adds the memory limit flag', () => {
-		expect(buildPhpArgs({ safeMode: false, memoryLimitMb: 256, composerAutoloadPath: null }, '/tmp/x')).toEqual([
+	it('always sets the memory limit and routes display errors to stderr', () => {
+		expect(buildPhpArgs({ memoryLimitMb: 128, restricted: false, composerAutoloadPath: null })).toEqual([
 			'-d',
-			'memory_limit=256M',
+			'memory_limit=128M',
+			'-d',
+			'display_errors=stderr',
 		]);
 	});
 
-	it('adds disabled functions and open_basedir in safe mode', () => {
-		const args = buildPhpArgs({ safeMode: true, memoryLimitMb: null, composerAutoloadPath: null }, '/tmp/box');
-		expect(args).toContain('-d');
+	it('adds the extended hardening flags in restricted mode', () => {
+		const args = buildPhpArgs({
+			memoryLimitMb: 256,
+			restricted: true,
+			composerAutoloadPath: null,
+			openBasedir: '/tmp/n8n-php-sandbox',
+		});
+
 		expect(args).toContain(
-			'disable_functions=exec,shell_exec,system,passthru,popen,proc_open',
+			'disable_functions=exec,shell_exec,system,passthru,popen,proc_open,pcntl_exec,dl,putenv,posix_kill,proc_nice',
 		);
-		expect(args).toContain('-d');
-		expect(args).toContain('open_basedir=/tmp/box');
+		expect(args).toContain('allow_url_fopen=0');
+		expect(args).toContain('allow_url_include=0');
+		expect(args).toContain('open_basedir=/tmp/n8n-php-sandbox');
 	});
 
-	it('adds the composer autoload prepend flag', () => {
-		const args = buildPhpArgs(
-			{ safeMode: false, memoryLimitMb: null, composerAutoloadPath: '/app/vendor/autoload.php' },
-			'/tmp/x',
-		);
+	it('omits open_basedir when no directory is given', () => {
+		const args = buildPhpArgs({ memoryLimitMb: 128, restricted: true, composerAutoloadPath: null });
+
+		expect(args.some((arg) => arg.startsWith('open_basedir='))).toBe(false);
+	});
+
+	it('adds the composer autoload prepend flag when provided', () => {
+		const args = buildPhpArgs({
+			memoryLimitMb: 128,
+			restricted: false,
+			composerAutoloadPath: '/app/vendor/autoload.php',
+		});
+
 		expect(args).toContain('auto_prepend_file=/app/vendor/autoload.php');
 	});
 });
 
 describe('runPhpProcess (integration)', () => {
-	it('runs a PHP script and captures its JSON output', async () => {
-		const { dir, path } = await createScript('<?php echo json_encode(["ok" => true]);');
+	it('executes code delivered via STDIN without any script file', async () => {
+		const result = await runPhpProcess({
+			binaryPath: 'php',
+			injectedCode: '<?php echo json_encode(["ok" => true]);',
+			timeoutMs: 10000,
+		});
 
-		try {
-			const result = await runPhpProcess({ binaryPath: 'php', scriptPath: path, timeoutMs: 10000 });
-
-			expect(result.exitCode).toBe(0);
-			expect(JSON.parse(result.stdout)).toEqual({ ok: true });
-		} finally {
-			await removeDir(dir);
-		}
+		expect(result.exitCode).toBe(0);
+		expect(JSON.parse(result.stdout)).toEqual({ ok: true });
 	}, 15000);
 
-	it('passes data to the script via STDIN', async () => {
-		const { dir, path } = await createScript('<?php echo stream_get_contents(STDIN);');
+	it('delivers the JSON payload on file descriptor 3', async () => {
+		const result = await runPhpProcess({
+			binaryPath: 'php',
+			injectedCode:
+				'<?php $f = fopen("php://fd/3", "r"); echo stream_get_contents($f);',
+			timeoutMs: 10000,
+			payloadJson: '{"items":[{"n":1}],"context":{"nodeName":"PHP"}}',
+		});
 
-		try {
-			const result = await runPhpProcess({
-				binaryPath: 'php',
-				scriptPath: path,
-				timeoutMs: 10000,
-				stdinData: '{"email":"a@b.c"}',
-			});
-
-			expect(result.stdout).toBe('{"email":"a@b.c"}');
-		} finally {
-			await removeDir(dir);
-		}
+		expect(JSON.parse(result.stdout)).toEqual({ items: [{ n: 1 }], context: { nodeName: 'PHP' } });
 	}, 15000);
 
-	it('applies ini settings passed as CLI args before the script path', async () => {
-		const { dir, path } = await createScript("<?php echo ini_get('memory_limit');");
+	it('emits the metrics marker line on STDERR for successful runs', async () => {
+		const result = await runPhpProcess({
+			binaryPath: 'php',
+			injectedCode: buildInjectedCode('<?php echo "hi";'),
+			timeoutMs: 10000,
+		});
 
-		try {
-			const result = await runPhpProcess({
-				binaryPath: 'php',
-				scriptPath: path,
-				args: ['-d', 'memory_limit=256M'],
-				timeoutMs: 10000,
-			});
+		expect(result.metrics).not.toBeNull();
+		expect(typeof result.metrics?.phpVersion).toBe('string');
+		expect(result.metrics?.executionTimeMs).toBeGreaterThanOrEqual(0);
+		expect(result.metrics?.peakMemoryUsageMb).toBeGreaterThan(0);
+	}, 15000);
 
-			expect(result.stdout.trim()).toBe('256M');
-		} finally {
-			await removeDir(dir);
-		}
+	it('applies ini settings passed as CLI args before reading STDIN', async () => {
+		const result = await runPhpProcess({
+			binaryPath: 'php',
+			args: ['-d', 'memory_limit=256M'],
+			injectedCode: "<?php echo ini_get('memory_limit');",
+			timeoutMs: 10000,
+		});
+
+		expect(result.stdout.trim()).toBe('256M');
 	}, 15000);
 
 	it('enforces safe mode restrictions via CLI args', async () => {
-		const { dir, path } = await createScript(
-			"<?php echo ini_get('disable_functions'), '|', ini_get('open_basedir');",
+		const args = buildPhpArgs({ memoryLimitMb: 128, restricted: true, composerAutoloadPath: null });
+		const result = await runPhpProcess({
+			binaryPath: 'php',
+			args,
+			injectedCode: "<?php echo ini_get('disable_functions'), '|', ini_get('allow_url_fopen');",
+			timeoutMs: 10000,
+		});
+		const [disabled, allowUrlFopen] = result.stdout.trim().split('|');
+
+		expect(disabled?.split(',')).toEqual(
+			expect.arrayContaining([
+				'exec',
+				'shell_exec',
+				'system',
+				'passthru',
+				'popen',
+				'proc_open',
+				'pcntl_exec',
+				'dl',
+				'putenv',
+				'posix_kill',
+				'proc_nice',
+			]),
 		);
-		const args = buildPhpArgs({ safeMode: true, memoryLimitMb: null, composerAutoloadPath: null }, dir);
-
-		try {
-			const result = await runPhpProcess({ binaryPath: 'php', scriptPath: path, args, timeoutMs: 10000 });
-			const [disabled, basedir] = result.stdout.trim().split('|');
-
-			expect(disabled?.split(',')).toEqual(
-				expect.arrayContaining(['exec', 'shell_exec', 'system', 'passthru', 'popen', 'proc_open']),
-			);
-			expect(basedir).toBe(dir);
-		} finally {
-			await removeDir(dir);
-		}
+		expect(allowUrlFopen).toBe('0');
 	}, 15000);
 
-	it('prepends the composer autoload file when provided', async () => {
-		const { dir, path } = await createScript('<?php echo "APP";');
-		const bootstrapPath = join(dir, 'autoload.php');
-		await writeFile(bootstrapPath, '<?php echo "BOOT\\n";', 'utf8');
-
-		try {
-			const result = await runPhpProcess({
-				binaryPath: 'php',
-				scriptPath: path,
-				args: ['-d', `auto_prepend_file=${bootstrapPath}`],
-				timeoutMs: 10000,
-			});
-
-			expect(result.stdout).toBe('BOOT\nAPP');
-		} finally {
-			await removeDir(dir);
-		}
-	}, 15000);
-
-	it('rejects with a friendly message when the binary does not exist (ENOENT)', async () => {
+	it('rejects with PhpBinaryNotFoundError when the binary does not exist (ENOENT)', async () => {
 		await expect(
 			runPhpProcess({
 				binaryPath: 'n8n-missing-php-binary',
-				scriptPath: join(tmpdir(), 'script.php'),
+				injectedCode: '<?php echo 1;',
 				timeoutMs: 5000,
 			}),
-		).rejects.toThrow(/PHP binary not found/);
+		).rejects.toThrow(PhpBinaryNotFoundError);
 	}, 15000);
 
-	it('rejects with stderr details on a non-zero exit code', async () => {
-		const { dir, path } = await createScript("<?php fwrite(STDERR, 'boom'); exit(3);");
+	it('resolves with a non-zero exit code and stderr details instead of throwing', async () => {
+		const result = await runPhpProcess({
+			binaryPath: 'php',
+			injectedCode: "<?php fwrite(STDERR, 'boom'); exit(3);",
+			timeoutMs: 10000,
+		});
 
-		try {
-			await expect(
-				runPhpProcess({ binaryPath: 'php', scriptPath: path, timeoutMs: 10000 }),
-			).rejects.toThrow('PHP exited with code 3: boom');
-		} finally {
-			await removeDir(dir);
-		}
+		expect(result.exitCode).toBe(3);
+		expect(result.stderr).toContain('boom');
+		expect(buildNonZeroExitError(result.exitCode, result.stderr, '').message).toContain(
+			'PHP exited with code 3: boom',
+		);
 	}, 15000);
 
-	it('rejects quickly when the timeout is exceeded', async () => {
-		const { dir, path } = await createScript('<?php sleep(30);');
+	it('rejects with PhpTimeoutError and kills the process when the timeout is exceeded', async () => {
 		const startedAt = Date.now();
 
-		try {
-			await expect(
-				runPhpProcess({ binaryPath: 'php', scriptPath: path, timeoutMs: 400 }),
-			).rejects.toThrow('PHP execution timed out after 0.4 s');
-			expect(Date.now() - startedAt).toBeLessThan(3000);
-		} finally {
-			await removeDir(dir);
-		}
+		await expect(
+			runPhpProcess({
+				binaryPath: 'php',
+				injectedCode: '<?php sleep(30);',
+				timeoutMs: 400,
+			}),
+		).rejects.toThrow(PhpTimeoutError);
+		expect(Date.now() - startedAt).toBeLessThan(3000);
 	}, 15000);
 
 	(hasPcntl ? it : it.skip)(
 		'sends SIGTERM first on timeout so the script can shut down gracefully',
 		async () => {
-			const dir = await mkdtemp(join(tmpdir(), 'n8n-php-test-'));
+			const dir = mkdtempSync(join(tmpdir(), 'n8n-php-test-'));
 			const markerPath = join(dir, 'sigterm-marker');
-			const path = join(dir, 'script.php');
 			const script = [
 				'<?php',
 				`$marker = ${JSON.stringify(markerPath)};`,
@@ -246,36 +239,57 @@ describe('runPhpProcess (integration)', () => {
 				'});',
 				'while (true) { usleep(20000); }',
 			].join('\n');
-			await writeFile(path, script, 'utf8');
 
 			try {
 				await expect(
-					runPhpProcess({ binaryPath: 'php', scriptPath: path, timeoutMs: 300 }),
+					runPhpProcess({ binaryPath: 'php', injectedCode: script, timeoutMs: 300 }),
 				).rejects.toThrow(/timed out/);
 
-				expect(await readMarkerWhenReady(markerPath)).toBe('sigterm received');
+				const deadline = Date.now() + 3000;
+				let marker: string | undefined;
+				while (Date.now() < deadline) {
+					try {
+						marker = readFileSync(markerPath, 'utf8');
+						break;
+					} catch {
+						await sleep(25);
+					}
+				}
+				expect(marker).toBe('sigterm received');
 			} finally {
-				await removeDir(dir);
+				rmSync(dir, { recursive: true, force: true });
 			}
 		},
 		15000,
 	);
 
 	it('kills the process and reports an error when output exceeds the limit', async () => {
-		const { dir, path } = await createScript(
-			'<?php echo str_repeat("a", 11 * 1024 * 1024);',
-		);
+		await expect(
+			runPhpProcess({
+				binaryPath: 'php',
+				injectedCode: '<?php echo str_repeat("a", 11 * 1024 * 1024);',
+				timeoutMs: 10000,
+			}),
+		).rejects.toThrow(OutputLimitExceededError);
+		await expect(
+			runPhpProcess({
+				binaryPath: 'php',
+				injectedCode: '<?php echo str_repeat("a", 11 * 1024 * 1024);',
+				timeoutMs: 10000,
+			}),
+		).rejects.toThrow('Output exceeded maximum allowed size (10MB)');
+	}, 30000);
 
-		try {
-			await expect(
-				runPhpProcess({ binaryPath: 'php', scriptPath: path, timeoutMs: 10000 }),
-			).rejects.toThrow(OutputLimitExceededError);
-			await expect(
-				runPhpProcess({ binaryPath: 'php', scriptPath: path, timeoutMs: 10000 }),
-			).rejects.toThrow('Output exceeded maximum allowed size (10MB)');
-		} finally {
-			await removeDir(dir);
-		}
+	it('reports memory exhaustion through stderr after a fatal error', async () => {
+		const result = await runPhpProcess({
+			binaryPath: 'php',
+			args: ['-d', 'memory_limit=64M'],
+			injectedCode: "<?php $a=[]; while(true){$a[]=str_repeat('x',1048576);}",
+			timeoutMs: 20000,
+		});
+
+		expect(result.exitCode).not.toBe(0);
+		expect(result.stderr).toMatch(/Allowed memory size of \d+ bytes exhausted/);
 	}, 30000);
 });
 
@@ -284,7 +298,7 @@ describe('runPhpProcess signal handling (injected fake process)', () => {
 		const { child, kill } = createFakeChild();
 		const promise = runPhpProcess({
 			binaryPath: 'php',
-			scriptPath: 'script.php',
+			injectedCode: '<?php sleep(30);',
 			timeoutMs: 50,
 			spawnFn: () => child,
 		});
@@ -299,45 +313,47 @@ describe('runPhpProcess signal handling (injected fake process)', () => {
 		await timeoutExpectation;
 	}, 10000);
 
-	it('writes the payload to stdin and closes the stream', async () => {
-		const { child, raw } = createFakeChild();
+	it('writes the injected code to stdin and closes both streams', async () => {
+		const { child, raw, payloadStdin } = createFakeChild();
 		const promise = runPhpProcess({
 			binaryPath: 'php',
-			scriptPath: 'script.php',
+			injectedCode: '<?php echo 1;',
 			timeoutMs: 5000,
-			stdinData: '{"x":1}',
+			payloadJson: '{"items":[]}',
 			spawnFn: () => child,
 		});
 
 		await sleep(20);
-		expect(child.stdin.write).toHaveBeenCalledWith('{"x":1}');
-		expect(child.stdin.end).toHaveBeenCalledTimes(1);
+		expect(child.stdin.end).toHaveBeenCalledWith('<?php echo 1;');
+		expect(payloadStdin.write).toHaveBeenCalledWith('{"items":[]}');
+		expect(payloadStdin.end).toHaveBeenCalledTimes(1);
 
 		raw.emit('close', 0, null);
 		await expect(promise).resolves.toMatchObject({ exitCode: 0 });
 	});
 
-	it('does not touch stdin when no payload is given', async () => {
-		const { child, raw } = createFakeChild();
+	it('closes the payload pipe even when there is no payload', async () => {
+		const { child, raw, payloadStdin } = createFakeChild();
 		const promise = runPhpProcess({
 			binaryPath: 'php',
-			scriptPath: 'script.php',
+			injectedCode: '<?php echo 1;',
 			timeoutMs: 5000,
+			payloadJson: null,
 			spawnFn: () => child,
 		});
 
 		raw.emit('close', 0, null);
 		await promise;
 
-		expect(child.stdin.write).not.toHaveBeenCalled();
-		expect(child.stdin.end).not.toHaveBeenCalled();
+		expect(payloadStdin.write).not.toHaveBeenCalled();
+		expect(payloadStdin.end).toHaveBeenCalledTimes(1);
 	});
 
 	it('collects streamed chunks from stdout and resolves on clean exit', async () => {
 		const { child, raw } = createFakeChild();
 		const promise = runPhpProcess({
 			binaryPath: 'php',
-			scriptPath: 'script.php',
+			injectedCode: '<?php echo 1;',
 			timeoutMs: 5000,
 			spawnFn: () => child,
 		});
@@ -346,19 +362,20 @@ describe('runPhpProcess signal handling (injected fake process)', () => {
 		child.stdout.emit('data', Buffer.from('1}'));
 
 		raw.emit('close', 0, null);
-		await expect(promise).resolves.toEqual({ stdout: '{"a":1}', stderr: '', exitCode: 0 });
+		await expect(promise).resolves.toMatchObject({ stdout: '{"a":1}', exitCode: 0 });
 	});
 
 	it('reports the terminating signal when killed externally', async () => {
 		const { child, raw } = createFakeChild();
 		const promise = runPhpProcess({
 			binaryPath: 'php',
-			scriptPath: 'script.php',
+			injectedCode: '<?php echo 1;',
 			timeoutMs: 5000,
 			spawnFn: () => child,
 		});
 
 		raw.emit('close', null, 'SIGKILL');
-		await expect(promise).rejects.toThrow('PHP process was terminated by signal SIGKILL');
+		await expect(promise).rejects.toThrow(PhpProcessError);
+		await expect(promise).rejects.toThrow('terminated by signal SIGKILL');
 	});
 });

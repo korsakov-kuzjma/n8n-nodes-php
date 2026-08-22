@@ -1,55 +1,74 @@
 import { spawn } from 'child_process';
 import type { ChildProcessWithoutNullStreams } from 'child_process';
-import type { ResolvedNodeOptions } from '../interfaces';
+import {
+	PhpBinaryNotFoundError,
+	PhpNodeError,
+	PhpProcessError,
+	PhpTimeoutError,
+	OutputLimitExceededError,
+} from './errors';
+import type { PhpMetrics } from './bootstrap';
+import { parseMetricsFromStderr } from './bootstrap';
 
 export const MAX_OUTPUT_BYTES = 10 * 1024 * 1024;
 
 const GRACEFUL_SHUTDOWN_MS = 2000;
-const DISABLED_FUNCTIONS = 'exec,shell_exec,system,passthru,popen,proc_open';
 
-export class OutputLimitExceededError extends Error {
-	constructor(maxBytes = MAX_OUTPUT_BYTES) {
-		super(`Output exceeded maximum allowed size (${Math.round(maxBytes / (1024 * 1024))}MB)`);
-		this.name = 'OutputLimitExceededError';
-	}
+export const EXTENDED_DISABLED_FUNCTIONS =
+	'exec,shell_exec,system,passthru,popen,proc_open,pcntl_exec,dl,putenv,posix_kill,proc_nice';
+
+export interface ProcessIsolation {
+	uid?: number;
+	gid?: number;
+	cwd?: string;
 }
 
 export type SpawnFunction = (
 	command: string,
 	args: readonly string[],
-	options: { stdio: ['pipe', 'pipe', 'pipe'] },
+	options: { stdio: ['pipe', 'pipe', 'pipe', 'pipe']; uid?: number; gid?: number; cwd?: string },
 ) => ChildProcessWithoutNullStreams;
 
 const defaultSpawn = spawn as unknown as SpawnFunction;
 
 export interface PhpSpawnOptions {
 	binaryPath: string;
-	scriptPath: string;
 	args?: string[];
+	injectedCode: string;
 	timeoutMs: number;
-	stdinData?: string | null;
+	payloadJson?: string | null;
 	maxOutputBytes?: number;
+	isolation?: ProcessIsolation;
 	spawnFn?: SpawnFunction;
 }
 
 export interface PhpProcessResult {
 	stdout: string;
 	stderr: string;
-	exitCode: number | null;
+	exitCode: number;
+	metrics: PhpMetrics | null;
 }
 
-export function buildPhpArgs(
-	options: Pick<ResolvedNodeOptions, 'safeMode' | 'memoryLimitMb' | 'composerAutoloadPath'>,
-	tempDir: string,
-): string[] {
-	const args: string[] = [];
+export function buildPhpArgs(options: {
+	memoryLimitMb: number;
+	restricted: boolean;
+	composerAutoloadPath: string | null;
+	openBasedir?: string | null;
+}): string[] {
+	const args: string[] = [
+		'-d',
+		`memory_limit=${options.memoryLimitMb}M`,
+		'-d',
+		'display_errors=stderr',
+	];
 
-	if (options.memoryLimitMb !== null) {
-		args.push('-d', `memory_limit=${options.memoryLimitMb}M`);
-	}
-	if (options.safeMode) {
-		args.push('-d', `disable_functions=${DISABLED_FUNCTIONS}`);
-		args.push('-d', `open_basedir=${tempDir}`);
+	if (options.restricted) {
+		args.push('-d', `disable_functions=${EXTENDED_DISABLED_FUNCTIONS}`);
+		args.push('-d', 'allow_url_fopen=0');
+		args.push('-d', 'allow_url_include=0');
+		if (options.openBasedir) {
+			args.push('-d', `open_basedir=${options.openBasedir}`);
+		}
 	}
 	if (options.composerAutoloadPath !== null) {
 		args.push('-d', `auto_prepend_file=${options.composerAutoloadPath}`);
@@ -57,14 +76,22 @@ export function buildPhpArgs(
 	return args;
 }
 
+function stripMetricsLines(text: string): string {
+	return text
+		.split('\n')
+		.filter((line) => !line.startsWith('__N8N_METRICS__'))
+		.join('\n');
+}
+
 export function runPhpProcess(options: PhpSpawnOptions): Promise<PhpProcessResult> {
 	const {
 		binaryPath,
-		scriptPath,
 		args = [],
+		injectedCode,
 		timeoutMs,
-		stdinData = null,
+		payloadJson = null,
 		maxOutputBytes = MAX_OUTPUT_BYTES,
+		isolation = {},
 		spawnFn = defaultSpawn,
 	} = options;
 
@@ -76,15 +103,18 @@ export function runPhpProcess(options: PhpSpawnOptions): Promise<PhpProcessResul
 		const stderrChunks: Buffer[] = [];
 		let graceTimer: NodeJS.Timeout | undefined;
 
-		const php = spawnFn(binaryPath, [...args, scriptPath], {
-			stdio: ['pipe', 'pipe', 'pipe'],
+		const php = spawnFn(binaryPath, args, {
+			stdio: ['pipe', 'pipe', 'pipe', 'pipe'],
+			uid: isolation.uid,
+			gid: isolation.gid,
+			cwd: isolation.cwd,
 		});
 
 		const timeoutTimer = setTimeout(() => {
 			if (settled) return;
 			php.kill('SIGTERM');
 			graceTimer = setTimeout(() => php.kill('SIGKILL'), GRACEFUL_SHUTDOWN_MS);
-			fail(new Error(`PHP execution timed out after ${timeoutMs / 1000} s`));
+			fail(new PhpTimeoutError(timeoutMs));
 		}, timeoutMs);
 
 		const fail = (error: Error): void => {
@@ -112,38 +142,54 @@ export function runPhpProcess(options: PhpSpawnOptions): Promise<PhpProcessResul
 		collect(php.stdout, stdoutChunks, true);
 		collect(php.stderr, stderrChunks, false);
 
-		if (stdinData !== null && php.stdin.writable) {
-			php.stdin.on('error', () => {});
-			php.stdin.write(stdinData);
-			php.stdin.end();
+		php.stdin.on('error', () => {});
+		php.stdin.end(injectedCode);
+
+		const payloadStream = php.stdio[3] as unknown as NodeJS.WritableStream | undefined;
+		if (payloadStream && typeof payloadStream.end === 'function') {
+			payloadStream.on('error', () => {});
+			if (payloadJson !== null) {
+				payloadStream.write(payloadJson);
+			}
+			payloadStream.end();
 		}
 
 		php.on('error', (error: NodeJS.ErrnoException) => {
-			const message =
+			fail(
 				error.code === 'ENOENT'
-					? `PHP binary not found ("${binaryPath}"). Install the PHP CLI or adjust the PHP Binary Path option.`
-					: error.message;
-			fail(new Error(message));
+					? new PhpBinaryNotFoundError(binaryPath)
+					: new PhpProcessError(error.message, null),
+			);
 		});
 
 		php.on('close', (code, signal) => {
 			clearTimeout(timeoutTimer);
 			clearTimeout(graceTimer);
-			if (settled) return;
-			settled = true;
 			const stdout = Buffer.concat(stdoutChunks).toString('utf8');
 			const stderr = Buffer.concat(stderrChunks).toString('utf8');
-			if (signal && code === null) {
-				reject(new Error(`PHP process was terminated by signal ${signal}`));
-				return;
-			}
+			const metrics = parseMetricsFromStderr(stderr);
 			const exitCode = code ?? -1;
-			if (exitCode !== 0) {
-				const details = (stderr.trim() || stdout.trim()).slice(0, 4000);
-				reject(new Error(`PHP exited with code ${exitCode}${details ? `: ${details}` : ''}`));
+			if (signal && code === null) {
+				fail(
+					new PhpProcessError(`PHP process was terminated by signal ${signal}`, exitCode),
+				);
 				return;
 			}
-			resolve({ stdout, stderr, exitCode });
+			if (settled) return;
+			settled = true;
+			resolve({ stdout, stderr, exitCode, metrics });
 		});
 	});
+}
+
+export function buildNonZeroExitError(
+	exitCode: number,
+	stderr: string,
+	stdout: string,
+): PhpNodeError {
+	const details = (stripMetricsLines(stderr).trim() || stdout.trim()).slice(0, 4000);
+	return new PhpProcessError(
+		`PHP exited with code ${exitCode}${details ? `: ${details}` : ''}`,
+		exitCode,
+	);
 }

@@ -6,33 +6,95 @@ import {
 	NodeConnectionTypes,
 	NodeOperationError,
 } from 'n8n-workflow';
-import { access, mkdtemp, rm, writeFile } from 'fs/promises';
-import { tmpdir } from 'os';
-import { join } from 'path';
-import { buildPhpArgs, runPhpProcess } from './helpers/phpProcess';
-import { parsePhpOutput } from './helpers/outputParser';
+import { access } from 'fs/promises';
+import type { PhpMetrics } from './helpers/bootstrap';
+import { buildInjectedCode } from './helpers/bootstrap';
+import { sha256, TtlCache } from './helpers/cache';
+import { buildNonZeroExitError, buildPhpArgs, runPhpProcess } from './helpers/phpProcess';
+import { parsePhpElements, throwIfFatal, toExecutionData, type ParsedPhpOutput } from './helpers/outputParser';
+import {
+	buildOpenBasedir,
+	prepareSandbox,
+	resolveIsolation,
+} from './helpers/sandbox';
+import { assertNoRestrictedPatterns } from './helpers/staticAnalysis';
+import { validateNodeOptions } from './helpers/validation';
 import {
 	DATA_INJECTION_METHODS,
 	type DataInjectionMethod,
+	type N8nContextInfo,
 	type PhpExecuteOptions,
+	type ValidatedNodeOptions,
 } from './interfaces';
 
-const DEFAULT_TIMEOUT_SECONDS = 30;
-const DEFAULT_PHP_BINARY = 'php';
-const DEFAULT_MEMORY_LIMIT_MB = 128;
+const DEFAULT_CODE =
+	'<?php\necho json_encode(["status" => "success", "input" => $n8nInput]);';
 
-function positiveNumber(value: unknown, fallback: number): number {
-	return typeof value === 'number' && Number.isFinite(value) && value > 0 ? value : fallback;
+interface CachePayload {
+	parsed: ParsedPhpOutput;
+	metrics: PhpMetrics | null;
 }
 
-async function existingFile(path: string | undefined): Promise<string | null> {
-	if (!path || !path.trim()) return null;
+const resultCache = new TtlCache(100);
+
+async function existingFile(path: string): Promise<boolean> {
 	try {
 		await access(path);
-		return path;
+		return true;
 	} catch {
-		return null;
+		return false;
 	}
+}
+
+function normalizeAdditionalFiles(raw: unknown): Array<{ name: string; content: string }> {
+	if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return [];
+	const files = (raw as Record<string, unknown>).files;
+	if (!Array.isArray(files)) return [];
+	return files
+		.filter((file): file is Record<string, unknown> => typeof file === 'object' && file !== null)
+		.map((file) => ({ name: String(file.name ?? ''), content: String(file.content ?? '') }))
+		.filter((file) => file.name.trim() !== '');
+}
+
+function safely<T>(fn: () => T, fallback: T): T {
+	try {
+		return fn();
+	} catch {
+		return fallback;
+	}
+}
+
+function buildContextInfo(ctx: IExecuteFunctions): N8nContextInfo {
+	const node = ctx.getNode();
+	const workflow = safely(() => ctx.getWorkflow(), undefined);
+	const executionId = safely(() => ctx.getExecutionId(), undefined);
+	const mode = safely(() => ctx.getMode(), undefined as unknown as string);
+	const runIndex = safely(() => ctx.getExecuteData()?.runIndex, undefined);
+	return {
+		nodeName: node.name,
+		nodeId: node.id ?? '',
+		workflowId: workflow?.id ? String(workflow.id) : '',
+		workflowName: workflow?.name ?? '',
+		runIndex: runIndex ?? 0,
+		executionId: executionId ?? '',
+		mode: mode === undefined ? '' : String(mode),
+	};
+}
+
+function pairOutputs(
+	parsed: ParsedPhpOutput,
+	sourceIndex: number,
+	inputCount: number,
+	isBatch: boolean,
+): INodeExecutionData[] {
+	const items = toExecutionData(parsed, sourceIndex);
+	if (!isBatch || inputCount === 0 || parsed.kind !== 'json') {
+		return items;
+	}
+	if (items.length === inputCount) {
+		return items.map((item, index) => ({ ...item, pairedItem: { item: index } }));
+	}
+	return items.map((item) => ({ ...item, pairedItem: { item: 0 } }));
 }
 
 export class PhpExecute implements INodeType {
@@ -41,9 +103,10 @@ export class PhpExecute implements INodeType {
 		name: 'phpExecute',
 		icon: { light: 'file:../../icons/php.svg', dark: 'file:../../icons/php-dark.svg' },
 		group: ['transform'],
-		version: 1,
-		subtitle: 'Run custom PHP code',
-		description: 'Executes arbitrary PHP code via the local PHP CLI and returns the result',
+		version: 2,
+		subtitle: 'Run custom PHP code in-memory',
+		description:
+			'Executes arbitrary PHP code via the local PHP CLI. Code is piped straight to STDIN — no temp files',
 		defaults: {
 			name: 'PHP Execute',
 		},
@@ -59,10 +122,9 @@ export class PhpExecute implements INodeType {
 					rows: 10,
 					editor: 'codeNodeEditor',
 				},
-				default:
-					'<?php\n$input = json_decode(file_get_contents("php://stdin"), true);\necho json_encode(["status" => "success", "input" => $input]);',
+				default: DEFAULT_CODE,
 				description:
-					'The PHP code to execute. Use echo to return data to n8n. The current item JSON arrives via STDIN unless another injection method is selected.',
+					'The PHP code to execute. It is piped to the interpreter via STDIN. Incoming data is available in the $n8nInput variable (first item), all items in $n8nItems and workflow metadata in $n8nContext.',
 			},
 			{
 				displayName: 'Data Injection Method',
@@ -74,16 +136,79 @@ export class PhpExecute implements INodeType {
 						name: 'Handlebars (Legacy)',
 						value: DATA_INJECTION_METHODS.HANDLEBARS,
 						description:
-							'Interpolate item fields into the code with n8n expressions (e.g. the email field) before execution',
+							'Interpolate item fields into the code with n8n expressions before execution',
 					},
 					{
-						name: 'STDIN',
+						name: 'Payload Variable ($n8nInput)',
 						value: DATA_INJECTION_METHODS.STDIN,
 						description:
-							'Pass the current item data to the PHP process via standard input. Safe for any special characters. Read it from php://stdin in your script',
+							'Pass item data out-of-band on a dedicated pipe; read it in your script via the pre-decoded $n8nInput variable',
 					},
 				],
 				description: 'How the incoming item data is made available to the PHP script',
+			},
+			{
+				displayName: 'Execution Mode',
+				name: 'executionMode',
+				type: 'options',
+				default: 'item-by-item',
+			options: [
+				{
+					name: 'Run Once for All Items',
+					value: 'batch',
+					description:
+						'Spawn a single PHP process for all items; iterate over $n8nItems and echo an array of results',
+				},
+				{
+					name: 'Run Once for Each Item',
+					value: 'item-by-item',
+					description:
+						'Spawn one PHP process per incoming item; $n8nInput holds the current item JSON',
+				},
+			],
+				description:
+					'Batch mode amortizes interpreter startup across all items but requires you to loop inside PHP',
+			},
+			{
+				displayName: 'Additional Files',
+				name: 'additionalFiles',
+				placeholder: 'Add File',
+				type: 'fixedCollection',
+				default: {},
+				typeOptions: {
+					multipleValues: true,
+					multipleValueButtonText: 'Add File',
+				},
+				options: [
+					{
+						name: 'files',
+						displayName: 'File',
+						values: [
+							{
+								displayName: 'File Name',
+								name: 'name',
+								type: 'string',
+								default: '',
+								placeholder: 'helpers.php',
+								description:
+									'File name written into the sandbox directory (letters, digits, dots, dashes, underscores)',
+							},
+							{
+								displayName: 'Content',
+								name: 'content',
+								type: 'string',
+								typeOptions: {
+									rows: 6,
+									editor: 'codeNodeEditor',
+								},
+								default: '',
+								description: 'PHP source of this file',
+							},
+						],
+					},
+				],
+				description:
+					'Extra files (classes, configs) written into the sandbox directory before execution; load them with require_once "name"',
 			},
 			{
 				displayName: 'Options',
@@ -91,118 +216,230 @@ export class PhpExecute implements INodeType {
 				type: 'collection',
 				placeholder: 'Add option',
 				default: {},
-				options: [
-					{
-						displayName: 'Composer Autoload Path',
-						name: 'composerAutoloadPath',
-						type: 'string',
-						default: '',
-						placeholder: '/var/www/app/vendor/autoload.php',
-						description:
-							'Path to a Composer vendor/autoload.php, prepended via auto_prepend_file. Ignored if the file does not exist.',
+			options: [
+				{
+					displayName: 'Composer Autoload Path',
+					name: 'composerAutoloadPath',
+					type: 'string',
+					default: '',
+					placeholder: '/var/www/app/vendor/autoload.php',
+					description:
+						'Path to a Composer vendor/autoload.php, prepended via auto_prepend_file. A warning is logged when the file does not exist.',
+				},
+				{
+					displayName: 'Memory Limit (MB)',
+					name: 'memoryLimit',
+					type: 'number',
+					typeOptions: {
+						minValue: 1,
+						maxValue: 4096,
+						numberPrecision: 0,
 					},
-					{
-						displayName: 'Memory Limit (MB)',
-						name: 'memoryLimit',
-						type: 'number',
-						typeOptions: {
-							minValue: 1,
+					default: 128,
+					description: 'PHP memory_limit in megabytes applied to the executed script',
+				},
+				{
+					displayName: 'PHP Binary Path',
+					name: 'phpBinaryPath',
+					type: 'string',
+					default: 'php',
+					description: 'Path to the PHP CLI binary, e.g. /usr/bin/php8.3',
+				},
+				{
+					displayName: 'Result Cache TTL (Seconds)',
+					name: 'resultCacheTtlSeconds',
+					type: 'number',
+					typeOptions: {
+						minValue: 0,
+						maxValue: 86400,
+						numberPrecision: 0,
+					},
+					default: 0,
+					description:
+						'Cache identical executions for this many seconds, keyed by a SHA-256 hash of code + input payload (0 disables caching)',
+				},
+				{
+					displayName: 'Security Level',
+					name: 'securityLevel',
+					type: 'options',
+					default: 'restricted',
+					options: [
+						{
+							name: 'Restricted',
+							value: 'restricted',
+							description:
+								'Disables shell/process/env functions, remote URL wrappers, restricts file access to the sandbox (open_basedir), runs a static code scan before execution and drops privileges to nobody when n8n runs as root',
 						},
-						default: DEFAULT_MEMORY_LIMIT_MB,
-						description: 'PHP memory_limit in megabytes applied to the executed script',
-					},
-					{
-						displayName: 'PHP Binary Path',
-						name: 'phpBinaryPath',
-						type: 'string',
-						default: DEFAULT_PHP_BINARY,
-						description: 'Path to the PHP CLI binary, e.g. /usr/bin/php8.3',
-					},
-					{
-						displayName: 'Safe Mode',
-						name: 'safeMode',
-						type: 'boolean',
-						default: false,
-						description: 'Whether to disable executable functions (exec, shell_exec, system, passthru, popen, proc_open) and restrict file access to the temporary script directory via open_basedir',
-					},
-					{
-						displayName: 'Strict JSON Mode',
-						name: 'strictJsonMode',
-						type: 'boolean',
-						default: false,
-						description: 'Whether to fail when the output is not valid JSON instead of returning it wrapped as { output }',
-					},
-					{
-						displayName: 'Timeout (Seconds)',
-						name: 'timeout',
-						type: 'number',
-						typeOptions: {
-							minValue: 1,
+						{
+							name: 'Unrestricted',
+							value: 'unrestricted',
+							description:
+								'No hardening at all: full function set, no open_basedir, no static analysis, no privilege drop. Only for fully trusted scripts.',
 						},
-						default: DEFAULT_TIMEOUT_SECONDS,
-						description: 'Maximum execution time before the PHP process receives SIGTERM (followed by SIGKILL after 2 s)',
+					],
+					description: 'How aggressively the executed code is sandboxed',
+				},
+				{
+					displayName: 'Strict JSON Mode',
+					name: 'strictJsonMode',
+					type: 'boolean',
+					default: false,
+					description:
+						'Whether to fail when the output is not valid JSON instead of returning it wrapped as { output }',
+				},
+				{
+					displayName: 'Timeout (Seconds)',
+					name: 'timeout',
+					type: 'number',
+					typeOptions: {
+						minValue: 1,
+						maxValue: 3600,
+						numberPrecision: 0,
 					},
-				],
+					default: 30,
+					description:
+						'Maximum execution time before the PHP process receives SIGTERM (followed by SIGKILL after 2 s)',
+				},
+			],
 			},
 		],
 	};
 
 	async execute(this: IExecuteFunctions): Promise<INodeExecutionData[][]> {
 		const items = this.getInputData();
+		if (items.length === 0) {
+			return [[]];
+		}
 		const returnData: INodeExecutionData[] = [];
+		const inputJsons = items.map((item) => item.json ?? {});
 
-		for (let i = 0; i < items.length; i++) {
+		const rawOptions = this.getNodeParameter('options', 0, {}) as PhpExecuteOptions;
+		let options: ValidatedNodeOptions;
+		try {
+			options = validateNodeOptions({
+				...rawOptions,
+				additionalFiles: normalizeAdditionalFiles(
+					this.getNodeParameter('additionalFiles', 0, {}),
+				),
+			});
+		} catch (error) {
+			throw new NodeOperationError(this.getNode(), error as Error);
+		}
+
+		const restricted = options.securityLevel === 'restricted';
+		const isBatch = options.executionMode === 'batch';
+		if (restricted) {
 			try {
-				const phpCode = this.getNodeParameter('phpCode', i) as string;
+				assertNoRestrictedPatterns(String(this.getNodeParameter('phpCode', 0, '')));
+			} catch (error) {
+				throw new NodeOperationError(this.getNode(), error as Error);
+			}
+		}
+
+		let composerAutoloadPath: string | null = null;
+		const composerCandidate = options.composerAutoloadPath.trim();
+		if (composerCandidate !== '') {
+			if (await existingFile(composerCandidate)) {
+				composerAutoloadPath = composerCandidate;
+			} else {
+				this.logger.warn(
+					`[PHP Execute] Composer autoload path is set, but the file does not exist: ${composerCandidate}. Continuing without it.`,
+				);
+			}
+		}
+
+		const isolation = resolveIsolation(restricted);
+		const sandboxDir = await prepareSandbox(options.additionalFiles, isolation.uid !== undefined);
+		const processIsolation = { ...isolation, cwd: sandboxDir };
+		const args = buildPhpArgs({
+			memoryLimitMb: options.memoryLimitMb,
+			restricted,
+			composerAutoloadPath,
+			openBasedir: restricted ? buildOpenBasedir(composerAutoloadPath) : null,
+		});
+
+		const contextInfo = buildContextInfo(this);
+		const indices = isBatch ? [0] : items.map((_, index) => index);
+
+		for (const itemIndex of indices) {
+			let metrics: PhpMetrics | null = null;
+			try {
+				const phpCode = String(this.getNodeParameter('phpCode', itemIndex, ''));
 				const injectionMethod = this.getNodeParameter(
 					'dataInjectionMethod',
-					i,
+					itemIndex,
 					DATA_INJECTION_METHODS.STDIN,
 				) as DataInjectionMethod;
-				const options = this.getNodeParameter('options', i, {}) as PhpExecuteOptions;
+				const payloadJson =
+					injectionMethod === DATA_INJECTION_METHODS.STDIN
+						? JSON.stringify({
+								items: isBatch ? inputJsons : [inputJsons[itemIndex] ?? {}],
+								context: contextInfo,
+							})
+						: null;
 
-				const binaryPath =
-					typeof options.phpBinaryPath === 'string' && options.phpBinaryPath.trim()
-						? options.phpBinaryPath.trim()
-						: DEFAULT_PHP_BINARY;
-				const timeoutMs =
-					positiveNumber(options.timeout, DEFAULT_TIMEOUT_SECONDS) * 1000;
-				const strictJsonMode = options.strictJsonMode === true;
-				const safeMode = options.safeMode === true;
-				const memoryLimitMb = positiveNumber(options.memoryLimit, DEFAULT_MEMORY_LIMIT_MB);
-				const composerAutoloadPath = await existingFile(options.composerAutoloadPath);
+				const cacheKey = sha256(
+					phpCode,
+					payloadJson ?? '',
+					options.binaryPath,
+					String(options.memoryLimitMb),
+					options.securityLevel,
+					composerAutoloadPath ?? '',
+					JSON.stringify(options.additionalFiles),
+					String(options.strictJsonMode),
+				);
 
-				const tempDir = await mkdtemp(join(tmpdir(), 'n8n-php-'));
-				try {
-					const tempFilePath = join(tempDir, 'script.php');
-					await writeFile(tempFilePath, phpCode, 'utf-8');
-					const args = buildPhpArgs({ safeMode, memoryLimitMb, composerAutoloadPath }, tempDir);
-					const stdinData =
-						injectionMethod === DATA_INJECTION_METHODS.STDIN
-							? JSON.stringify(items[i].json ?? {})
-							: null;
+				const runFresh = async (): Promise<CachePayload> => {
 					const result = await runPhpProcess({
-						binaryPath,
-						scriptPath: tempFilePath,
+						binaryPath: options.binaryPath,
 						args,
-						timeoutMs,
-						stdinData,
+						injectedCode: buildInjectedCode(phpCode),
+						timeoutMs: options.timeoutMs,
+						payloadJson,
+						isolation: processIsolation,
 					});
-					returnData.push(
-						...parsePhpOutput(result.stdout, { itemIndex: i, strictJsonMode }),
-					);
-				} finally {
-					await rm(tempDir, { recursive: true, force: true });
+					const runMetrics: PhpMetrics = { ...(result.metrics ?? {}), exitCode: result.exitCode };
+					this.logger.debug('[PHP Execute] metrics', runMetrics);
+					metrics = runMetrics;
+					throwIfFatal(result.stdout, result.stderr, options.memoryLimitMb);
+					if (result.exitCode !== 0) {
+						throw buildNonZeroExitError(result.exitCode, result.stderr, result.stdout);
+					}
+					return {
+						parsed: parsePhpElements(result.stdout, {
+							strictJsonMode: options.strictJsonMode,
+						}),
+						metrics: runMetrics,
+					};
+				};
+
+				let cachePayload: CachePayload | undefined;
+				if (options.resultCacheTtlSeconds > 0) {
+					cachePayload = resultCache.get(cacheKey) as CachePayload | undefined;
 				}
+				if (!cachePayload) {
+					cachePayload = await runFresh();
+					if (options.resultCacheTtlSeconds > 0) {
+						resultCache.set(cacheKey, cachePayload, options.resultCacheTtlSeconds * 1000);
+					}
+				} else {
+					this.logger.debug('[PHP Execute] served result from cache');
+				}
+				metrics = cachePayload.metrics;
+
+				returnData.push(...pairOutputs(cachePayload.parsed, itemIndex, items.length, isBatch));
 			} catch (error) {
 				if (this.continueOnFail()) {
 					returnData.push({
-						json: { error: (error as Error).message },
-						pairedItem: { item: i },
+						json: {
+							error: (error as Error).message,
+							...(metrics ? { _phpMetrics: metrics } : {}),
+						},
+						pairedItem: { item: itemIndex },
 					});
 					continue;
 				}
-				throw new NodeOperationError(this.getNode(), error as Error, { itemIndex: i });
+				throw new NodeOperationError(this.getNode(), error as Error, { itemIndex });
 			}
 		}
 		return [returnData];

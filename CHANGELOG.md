@@ -2,6 +2,32 @@
 
 All notable changes to this project will be documented in this file.
 
+## 2.0.0 - 2026-08-23
+
+### ⚠️ Breaking changes
+
+- **PHP code is now piped to STDIN** (in-memory execution, no temp files). Data is delivered on a dedicated extra pipe and exposed as PHP variables: `$n8nInput` (current item), `$n8nItems` (all items), `$n8nContext` (workflow/execution metadata). Scripts that previously read `php://stdin` for data must switch to `$n8nInput`.
+- `__FILE__` / `__DIR__` now resolve to `Standard input code`, not a temp script path.
+- **Safe Mode boolean replaced by Security Level dropdown** (*Restricted* / *Unrestricted*). Legacy workflows with `safeMode: true/false` keep their intent; workflows that never touched the option become **Restricted** — shell-execution calls are blocked before the process starts.
+- In Restricted mode scalar JSON roots are typed (`{"output": 42}` as number, not `"42"`).
+
+### Added
+
+- **In-memory execution**: code goes to STDIN, JSON payload to an extra pipe; no temp files or disk I/O.
+- **Execution Mode** property: *Run Once for Each Item* (default) or *Run Once for All Items* (batch) — one process for all items with 1:1 `pairedItem` mapping when output count matches input count.
+- **Security Level** option: *Restricted* (default) enforces extended `disable_functions` (`exec`, `shell_exec`, `system`, `passthru`, `popen`, `proc_open`, `pcntl_exec`, `dl`, `putenv`, `posix_kill`, `proc_nice`), `allow_url_fopen=0`, `allow_url_include=0`, `open_basedir` on the sandbox directory, plus pre-execution static analysis of the code; *Unrestricted* keeps only memory/timeout limits.
+- OS-level privilege drop in Restricted mode when n8n runs as root: worker processes run as `nobody` (uid/gid 65534) inside `/tmp/n8n-php-sandbox`.
+- Static code analysis before spawning in Restricted mode: blocks shell execution functions, backtick operators, remote includes and URL fetchers with a precise violation report.
+- Typed error hierarchy: `PhpNodeError` base with `PhpBinaryNotFoundError`, `PhpTimeoutError`, `PhpMemoryLimitError`, `PhpSafeModeViolationError`, `PhpFatalError` (parsed from a fatal-error shutdown envelope), `OutputLimitExceededError`, `PhpProcessError`; OOM stderr is detected even without the envelope.
+- Fatal-error wrapper injected via `register_shutdown_function`: uncaught fatals surface as structured errors instead of raw non-zero exit codes.
+- **Workflow context payload** sent to every execution: node name/id, workflow id/name, execution id, current run index and n8n mode.
+- Execution metrics (`phpVersion`, `executionTimeMs`, `peakMemoryUsageMb`, `exitCode`) logged per run and attached as `_phpMetrics` to items produced under *Continue On Fail*.
+- **Result Cache TTL (Seconds)** option: identical executions within the TTL window return cached results (SHA-256 key over code + payload + settings, LRU cap 100 entries).
+- **Additional Files** collection: helper scripts written into the sandbox before execution (names validated); `require 'helper.php'` works out of the box because the process working directory is the sandbox.
+- Options validation via `zod` (coercion + bounds), bundled into the build artifact so the package keeps zero runtime dependencies.
+- Composer autoload existence check with a warning instead of a hard failure.
+- ADR-0001 documenting why spawn-per-run beats a process pool for this threat model.
+
 ## 1.0.0 - 2026-08-22
 
 ### Added

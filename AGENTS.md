@@ -10,19 +10,29 @@ Instructions for AI coding agents working in this repository.
 
 ```bash
 npm ci            # install dependencies
-npm run build     # compile TS -> dist/ (must succeed)
+npm run build     # tsc + esbuild bundle of zod into dist/ (must succeed)
 npm run lint      # eslint incl. @n8n/community-nodes rules (must pass with 0 errors)
 npm run lint:fix  # autofix where possible
+npm test          # jest suite (unit + real-process integration tests)
 npm run dev       # scratch n8n instance with the node loaded
 ```
 
-A local `php` CLI is required to exercise runtime behavior (`php -v`). There is no unit test suite; when changing execution logic, smoke-test manually (e.g. require the built `dist/nodes/PhpExecute/PhpExecute.node.js`, call `execute()` with a stubbed context, verify items/errors/temp-dir cleanup).
+A local `php` CLI is required to exercise runtime behavior (`php -v`). When changing execution logic beyond what the jest suite covers, smoke-test manually (require the built `dist/nodes/PhpExecute/PhpExecute.node.js`, call `execute()` with a stubbed context, verify items/errors/sandbox cleanup).
 
-Always run `npm run lint && npm run build` before committing.
+Always run `npm run lint && npm test && npm run build` before committing.
 
 ## Key files
 
-- `nodes/PhpExecute/PhpExecute.node.ts` — the entire node implementation.
+- `nodes/PhpExecute/PhpExecute.node.ts` — node UI definition + `execute()` orchestration.
+- `nodes/PhpExecute/helpers/` — the actual implementation modules:
+  - `phpProcess.ts` — spawn/lifecycle (code via STDIN, payload via fd 3);
+  - `bootstrap.ts` — PHP preamble injected before user code (fatal envelope, metrics marker, payload variables);
+  - `validation.ts` — zod option schemas; `staticAnalysis.ts` — restricted-mode pattern gate;
+  - `sandbox.ts` — sandbox dir/additional files/privilege drop; `cache.ts` — TTL result cache;
+  - `outputParser.ts` — fatal-envelope/OOM detection + stdout parsing; `errors.ts` — error hierarchy.
+- `scripts/bundle.mjs` — esbuild post-build step inlining `zod` into `dist/nodes/PhpExecute/PhpExecute.node.js`.
+- `nodes/PhpExecute/__tests__/` — jest suites; `phpProcess.test.ts` and `phpExecute.node.test.ts` spawn a real `php`.
+- `docs/adr/0001-php-process-pool.md` — why execution is spawn-per-run.
 - `package.json` — `"n8n".nodes[]` must point at the compiled output path; it must match the source file location (`dist/nodes/<Dir>/<Name>.node.js`).
 - `icons/php.svg`, `icons/php-dark.svg` — light/dark icon variants. Lint forbids pointing both at the same file; dark variant uses brighter fills.
 - `CHANGELOG.md` — one `## X.Y.Z - YYYY-MM-DD` section per release. **CI extracts this section verbatim as the GitHub Release body** — never reword old headings, keep the exact format.
@@ -34,7 +44,10 @@ Always run `npm run lint && npm run build` before committing.
 - `eslint.config.mjs` exports `configWithoutCloudSupport`, and `"n8n"."strict"` is `false`: the node requires Node builtins (`child_process`, `fs/promises`, `os`, `path`) which n8n Cloud forbids. Re-enabling cloud support breaks lint.
 - The `prepublishOnly` script intentionally blocks bare `npm publish` (exits unless `RELEASE_MODE=true`). Publishing happens through CI on tag push. Do not bypass it except as an explicit emergency fallback.
 - Tags are bare semver (`0.3.0`, no `v` prefix) — the publish workflow trigger depends on it.
-- Temp scripts are created in a unique `mkdtemp` directory and removed in `finally`; spawned processes have a timeout that sends SIGKILL. Preserve both behaviors.
+- Execution is fully in-memory: user code goes to the PHP process's STDIN (bootstrap preamble + user code in one stream), payload JSON goes to an extra pipe (fd 3). Never reintroduce temp script files.
+- Community lint rules forbid runtime dependencies; `zod` must therefore stay bundled by `scripts/bundle.mjs` and must not appear in `dependencies`/`peerDependencies` (only `n8n-workflow` is allowed as a peer).
+- The sandbox directory (`os.tmpdir()/n8n-php-sandbox`) persists between runs so additional files can be reused; spawned processes have a timeout that sends SIGTERM then SIGKILL after a grace period. Preserve both behaviors.
+- Restricted mode is the default Security Level; legacy `safeMode` boolean maps onto it. Do not weaken `disable_functions`, `open_basedir`, or static analysis without an explicit request.
 
 ## Code conventions
 
