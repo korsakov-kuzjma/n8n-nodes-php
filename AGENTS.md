@@ -42,7 +42,7 @@ Always run `npm run lint && npm test && npm run build` before committing.
 - `icons/php.svg`, `icons/php-dark.svg` — light/dark icon variants. Lint forbids pointing both at the same file; dark variant uses brighter fills.
 - `CHANGELOG.md` — one `## X.Y.Z - YYYY-MM-DD` section per release. **CI extracts this section verbatim as the GitHub Release body** — never reword old headings, keep the exact format.
 - `.github/workflows/publish.yml` — publishes to npm (provenance via OIDC/Trusted Publisher) and creates the GitHub Release on every `*.*.*` tag push.
-- `.github/workflows/ci.yml` — lint + build on pushes to `master`/`main` and PRs.
+- `.github/workflows/ci.yml` — lint + build on pushes to `master` and PRs.
 
 ## Non-obvious decisions (do not revert)
 
