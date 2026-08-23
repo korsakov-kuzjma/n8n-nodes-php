@@ -50,7 +50,7 @@
     "prettier": "3.8.3",
     "release-it": "21.0.2",
     "ts-jest": "^29.4.12",
-    "typescript": "5.9.3"
+    "typescript": "7.0.2"
   },
   "peerDependencies": {
     "n8n-workflow": "*"
