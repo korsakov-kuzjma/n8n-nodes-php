@@ -2,6 +2,14 @@
 
 All notable changes to this project will be documented in this file.
 
+## 2.0.2 - 2026-08-23
+
+### Changed
+
+- Maintenance release — no changes to node behavior:
+  - CI and publish workflows use `actions/checkout` v7 instead of v4 ([#1](https://github.com/korsakov-kuzjma/n8n-nodes-php/pull/1)).
+  - Dev tooling: `release-it` bumped to 21.0.2 ([#5](https://github.com/korsakov-kuzjma/n8n-nodes-php/pull/5)); transitive dev dependency `ip-address` bumped to 10.5.0 ([#7](https://github.com/korsakov-kuzjma/n8n-nodes-php/pull/7)).
+
 ## 2.0.1 - 2026-08-23
 
 ### Fixed

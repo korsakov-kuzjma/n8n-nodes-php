@@ -217,6 +217,10 @@ Restricted mode is designed so that even hostile code cannot escape to a shell o
 
 ## Version history
 
+### 2.0.2
+
+- Maintenance release, no node behavior changes: CI workflows use `actions/checkout@v7`; dev tooling updated (`release-it` 21, transitive `ip-address` 10.5).
+
 ### 2.0.1
 
 - Bugfix release: static analysis now covers **Additional Files** and the `phpCode` resolved for every input item (Restricted mode).
