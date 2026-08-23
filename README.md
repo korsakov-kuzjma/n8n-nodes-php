@@ -2,7 +2,7 @@
 
 **English** | [Русский](README.ru.md)
 
-![GitHub License](https://img.shields.io/github/license/korsakov-kuzjma/n8n-nodes-php)
+![GitHub License](https://img.shields.io/github/license/korsakov-kuzjma/n8n-nodes-php) [![n8n community node](https://img.shields.io/badge/n8n-community--node-orange)](https://n8n.io)
 
 This is an [n8n](https://n8n.io/) community node. It lets you execute arbitrary **PHP** code directly in your n8n workflows.
 
