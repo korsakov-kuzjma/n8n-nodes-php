@@ -2,6 +2,15 @@
 
 All notable changes to this project will be documented in this file.
 
+## 2.0.3 - 2026-08-24
+
+### Changed
+
+- Maintenance release — no changes to node behavior:
+  - Dev tooling: `@n8n/node-cli` bumped from 0.33.1 to 0.44.5, pulling fixed transitive versions (`axios`, `undici`, `js-yaml`, `lodash`, `form-data`, `minimatch`, in-tree `n8n-workflow`) and clearing most Dependabot security alerts against `package-lock.json`. The remaining alerts sit inside exact-pinned subtrees of the CLI itself and clear with its next upstream update.
+  - Bundled `zod` resolves to 3.25.76 (still v3; API-compatible).
+  - ESLint: `no-dangerous-functions` is disabled only for integration-test files (`nodes/**/__tests__/**`) that legitimately spawn a real `php` binary — production code stays fully covered.
+
 ## 2.0.2 - 2026-08-23
 
 ### Changed

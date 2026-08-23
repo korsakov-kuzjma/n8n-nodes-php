@@ -219,6 +219,10 @@ Restricted mode is designed so that even hostile code cannot escape to a shell o
 
 ## Version history
 
+### 2.0.3
+
+- Maintenance release, no node behavior changes: `@n8n/node-cli` 0.33.1 → 0.44.5 with fixed transitive dependencies (`axios`, `undici`, `js-yaml`, `lodash`, `form-data`, `minimatch`), clearing most Dependabot security alerts; bundled zod resolves to 3.25.76.
+
 ### 2.0.2
 
 - Maintenance release, no node behavior changes: CI workflows use `actions/checkout@v7`; dev tooling updated (`release-it` 21, transitive `ip-address` 10.5).
