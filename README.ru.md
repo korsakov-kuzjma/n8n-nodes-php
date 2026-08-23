@@ -2,6 +2,8 @@
 
 [English](README.md) | **Русский**
 
+![GitHub License](https://img.shields.io/github/license/korsakov-kuzjma/n8n-nodes-php) [![n8n community node](https://img.shields.io/badge/n8n-community--node-orange)](https://n8n.io)
+
 Community-нода для [n8n](https://n8n.io/), позволяющая выполнять произвольный код на **PHP** прямо в воркфлоу n8n.
 
 [n8n](https://n8n.io/) — платформа автоматизации воркфлоу с fair-code лицензией.
