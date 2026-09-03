@@ -2,6 +2,16 @@
 
 All notable changes to this project will be documented in this file.
 
+## 2.0.4 - 2026-09-03
+
+### Changed
+
+- Maintenance release — no changes to node behavior:
+  - Dev tooling: `@n8n/node-cli` bumped from 0.44.5 to 0.46.0 ([#9](https://github.com/korsakov-kuzjma/n8n-nodes-php/pull/9)); `prettier` bumped from 3.8.3 to 3.9.6.
+  - CI and publish workflows use `actions/setup-node` v7 instead of v4 ([#12](https://github.com/korsakov-kuzjma/n8n-nodes-php/pull/12)).
+  - Documentation refresh in `README.md` / `README.ru.md`.
+  - Note: a few moderate Dependabot security alerts remain against `package-lock.json`; they sit in exact-pinned dev subtrees of the CLI (`qs`, `@humanfs/node`) and clear with its next upstream update. They affect build tooling only — the bundled runtime artifact still ships only `zod`.
+
 ## 2.0.3 - 2026-08-24
 
 ### Changed

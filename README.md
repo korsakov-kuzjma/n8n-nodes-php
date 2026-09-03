@@ -219,6 +219,10 @@ Restricted mode is designed so that even hostile code cannot escape to a shell o
 
 ## Version history
 
+### 2.0.4
+
+- Maintenance release, no node behavior changes: `@n8n/node-cli` 0.44.5 → 0.46.0 and `prettier` 3.8.3 → 3.9.6; CI workflows use `actions/setup-node@v7`; docs refreshed.
+
 ### 2.0.3
 
 - Maintenance release, no node behavior changes: `@n8n/node-cli` 0.33.1 → 0.44.5 with fixed transitive dependencies (`axios`, `undici`, `js-yaml`, `lodash`, `form-data`, `minimatch`), clearing most Dependabot security alerts; bundled zod resolves to 3.25.76.
